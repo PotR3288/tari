@@ -20,17 +20,15 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
+
 use hyper::{Response, StatusCode, body::Bytes};
 use log::{debug, info, trace, warn};
 use serde_json::{Value, json};
 use tari_common_types::{
     tari_address::TariAddress,
     types::{
-        BlockHash,
-        CompressedCommitment,
-        CompressedPublicKey,
-        CompressedSignature,
-        UncompressedCommitment,
+        BlockHash, CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
         UncompressedPublicKey,
     },
 };
@@ -44,19 +42,19 @@ use tari_transaction_components::{
     key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface, TxoStage},
     tari_proof_of_work::PowAlgorithm,
     transaction_components::{
-        CoinBaseExtra,
-        KernelBuilder,
-        RangeProofType,
-        TransactionKernel,
-        TransactionKernelVersion,
+        CoinBaseExtra, KernelBuilder, RangeProofType, TransactionKernel, TransactionKernelVersion,
         memo_field::{MemoField, TxType},
     },
 };
 use tari_utilities::ByteArray;
+use tokio::sync::RwLock;
 
 use super::{
+    MinerId,
     block_template_storage::BlockTemplateStorage,
     error::XmrigProxyError,
+    miner_registry::MinerRegistry,
+    nonce_partition::NoncePartitioner,
     service::{ProxyBody, json_response},
 };
 
@@ -83,12 +81,54 @@ pub struct InnerService {
     pub wallet_payment_address: TariAddress,
     pub coinbase_extra: Vec<u8>,
     pub range_proof_type: RangeProofType,
+    pub miner_registry: MinerRegistry,
+    pub nonce_partitioner: Arc<RwLock<NoncePartitioner>>,
+    /// The remote socket address of the miner that opened this connection.
+    pub peer_addr: SocketAddr,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct ChainTip {
     height: u64,
     top_hash: BlockHash,
+}
+
+/// Extract miner identity from a JSON-RPC request and peer address.
+///
+/// Three-layer resolution:
+/// 1. `params.wallet_address` — if the miner supplies a valid Tari address, use its hex hash
+/// 2. `peer_addr` — fall back to the remote socket address (IP:port) of the TCP connection
+/// 3. Auto-generated — timestamp + random suffix (last resort for malformed requests)
+fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
+    // Layer 1: wallet address from request
+    if let Some(addr) = parse_wallet_address_from_request(req) {
+        return format!("{}", addr);
+    }
+
+    // Layer 2: peer socket address (IP:port) — distinguishes miners behind NAT
+    // sharing a wallet but on different local ports
+    if peer_addr != SocketAddr::from(([0, 0, 0, 0], 0)) {
+        return peer_addr.to_string();
+    }
+
+    // Layer 3: auto-generated unique ID
+    format!(
+        "auto_{}_{}",
+        std::time::SystemTime::now()
+            .elapsed()
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        std::hash::Hasher::finish(&std::collections::hash_map::DefaultHasher::default())
+    )
+}
+
+/// Extract an optional wallet address override from a JSON-RPC request.
+fn parse_wallet_address_from_request(req: &Value) -> Option<TariAddress> {
+    let address_str = req
+        .get("params")
+        .and_then(|p| p.get("wallet_address"))
+        .and_then(|v| v.as_str())?;
+    TariAddress::from_str(address_str).ok()
 }
 
 impl InnerService {
@@ -174,6 +214,43 @@ impl InnerService {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_get_block_template(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
+        // 1. Parse miner identity from request (three-layer: wallet_address > peer_addr > auto)
+        let miner_id = parse_miner_id_from_request(req, self.peer_addr);
+        let requested_wallet_address = parse_wallet_address_from_request(req);
+        let payment_address = requested_wallet_address
+            .clone()
+            .unwrap_or_else(|| self.wallet_payment_address.clone());
+
+        // 2. Register or refresh miner with real peer address
+        self.miner_registry
+            .get_or_register(&miner_id, self.peer_addr, requested_wallet_address.clone())
+            .await?;
+
+        // 3. Check template cache for existing template with same wallet address
+        if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
+            let nonce_range =
+                self.nonce_partitioner
+                    .write()
+                    .await
+                    .assign(&miner_id)
+                    .ok_or(XmrigProxyError::MinerValidationError(
+                        "No nonce space available".to_string(),
+                    ))?;
+
+            self.block_templates
+                .add_miner_to_template(cached_key, miner_id.clone(), nonce_range)
+                .await;
+
+            debug!(
+                target: LOG_TARGET,
+                "Cached template hit for miner {miner_id}, address {}",
+                payment_address
+            );
+
+            return self.build_template_response(&cached_key, &miner_id, req).await;
+        }
+
+        // 4. No cached template — generate a new one
         let mut handler = self.node_service.clone();
 
         // Get chain metadata to determine block height for weight/coinbase calculations
@@ -194,7 +271,7 @@ impl InnerService {
 
         let height = new_template.header.height;
         // Capture target_difficulty from the template before it's consumed by get_new_block
-        let target_difficulty = new_template.target_difficulty.as_u64();
+        let _target_difficulty = new_template.target_difficulty.as_u64();
 
         // Calculate the coinbase reward for this block
         let reward = self
@@ -214,7 +291,7 @@ impl InnerService {
             ));
         }
 
-        // Generate the coinbase output and kernel for our wallet address
+        // Generate the coinbase output and kernel for the payment address
         let coinbase_extra = CoinBaseExtra::try_from(self.coinbase_extra.clone())
             .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
         let key_manager = KeyManager::new_random().map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
@@ -227,7 +304,7 @@ impl InnerService {
             &coinbase_extra,
             &key_manager,
             &script_key_id,
-            &self.wallet_payment_address,
+            &payment_address,
             false, // stealth_payment
             constants,
             self.range_proof_type,
@@ -295,7 +372,6 @@ impl InnerService {
         })?;
 
         let block_height = new_block.header.height;
-        let prev_hash = new_block.header.prev_hash.to_vec();
 
         // Compute the RandomXT mining hash
         let mining_hash = match new_block.header.pow.pow_algo {
@@ -316,37 +392,122 @@ impl InnerService {
 
         // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
         let vm_key_height = tari_rx_vm_key_height(block_height);
+        let _vm_key = *handler
+            .get_header(vm_key_height)
+            .await?
+            .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
+            .hash();
+
+        // Assign nonce range and store template with miner context
+        let nonce_range =
+            self.nonce_partitioner
+                .write()
+                .await
+                .assign(&miner_id)
+                .ok_or(XmrigProxyError::MinerValidationError(
+                    "No nonce space available".to_string(),
+                ))?;
+
+        let mining_hash_key: [u8; 32] = mining_hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| XmrigProxyError::MissingData("mining hash not 32 bytes".to_string()))?;
+
+        self.block_templates
+            .store(
+                mining_hash_key,
+                new_block,
+                payment_address.clone(),
+                miner_id.clone(),
+                nonce_range,
+            )
+            .await;
+
+        debug!(
+            target: LOG_TARGET,
+            "New template for height #{block_height}, miner {miner_id}, address {}",
+            payment_address
+        );
+
+        // Build response via shared helper
+        self.build_template_response(&mining_hash_key, &miner_id, req).await
+    }
+
+    /// Build the JSON-RPC response for a block template (used by both cached and fresh paths).
+    async fn build_template_response(
+        &self,
+        mining_hash_key: &[u8; 32],
+        miner_id: &str,
+        req: &Value,
+    ) -> Result<Response<ProxyBody>, XmrigProxyError> {
+        let block = match self.block_templates.get(mining_hash_key).await {
+            Some(b) => b,
+            None => {
+                return Err(XmrigProxyError::InternalError(
+                    "Template disappeared after store".to_string(),
+                ));
+            },
+        };
+        let block_height = block.header.height;
+
+        // Re-derive mining hash from the stored block (nonce is zero at template time)
+        let mining_hash = match block.header.pow.pow_algo {
+            PowAlgorithm::RandomXT => block.header.mining_hash().to_vec(),
+            algo => {
+                return Err(XmrigProxyError::InternalError(format!(
+                    "Expected RandomXT block template, got {algo:?}"
+                )));
+            },
+        };
+
+        // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
+        let mut handler = self.node_service.clone();
+        let vm_key_height = tari_rx_vm_key_height(block_height);
         let vm_key = *handler
             .get_header(vm_key_height)
             .await?
             .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
             .hash();
 
+        // Derive target difficulty from the consensus constants at this height
+        let target_difficulty = self
+            .consensus_rules
+            .consensus_constants(block_height)
+            .min_pow_difficulty(PowAlgorithm::RandomXT)
+            .as_u64();
+        let target_difficulty_bytes = target_difficulty.to_be_bytes();
+        let target_difficulty_val = u64::from_be_bytes(target_difficulty_bytes);
+
+        // Calculate expected reward
+        let expected_reward = self
+            .consensus_rules
+            .calculate_coinbase_and_fees(block_height, block.body.kernels())
+            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
+            .as_u64();
+
         // Build the 76-byte XMRig-compatible mining blob
+        let miner_nonce_range = self
+            .nonce_partitioner
+            .read()
+            .await
+            .get_range(miner_id)
+            .map(|r| r.start as u64..r.end as u64)
+            .unwrap_or_else(|| 0..(u32::MAX as u64));
         let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
         let blob_hex = hex::encode(&blob);
         let seed_hex = hex::encode(vm_key);
-        let prev_hash_hex = hex::encode(&prev_hash);
-
-        let target_difficulty_val = target_difficulty;
-        let expected_reward = reward;
-
-        // Store the block template keyed by the 32-byte mining hash
-        let mining_hash_key: [u8; 32] = mining_hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| XmrigProxyError::MissingData("mining hash not 32 bytes".to_string()))?;
-        self.block_templates.store(mining_hash_key, new_block).await;
+        let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
 
         debug!(
             target: LOG_TARGET,
-            "Returning block template for height #{block_height}, seed={seed_hex}"
+            "Template response for height #{block_height}, miner {miner_id}, range {:?}",
+            miner_nonce_range
         );
 
         json_response(
             StatusCode::OK,
             &json_rpc_success(
-                req["id"].as_i64(),
+                req.get("id").and_then(|v| v.as_i64()),
                 json!({
                     "blocktemplate_blob": blob_hex,
                     "blockhashing_blob": blob_hex,
@@ -358,6 +519,11 @@ impl InnerService {
                     "expected_reward": expected_reward,
                     "status": "OK",
                     "untrusted": false,
+                    "miner_id": miner_id,
+                    "nonce_range": {
+                        "start": miner_nonce_range.start,
+                        "end": miner_nonce_range.end,
+                    },
                 }),
             ),
         )
@@ -415,7 +581,42 @@ impl InnerService {
             .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
         let nonce = u64::from_be_bytes(nonce_bytes);
 
-        // Look up the stored block template
+        // Parse miner identity from request
+        let miner_id = parse_miner_id_from_request(req, self.peer_addr);
+
+        // Validate miner is registered
+        if !self.miner_registry.is_registered(&miner_id).await {
+            warn!(
+                target: LOG_TARGET,
+                "Submit rejected: miner {miner_id} not registered"
+            );
+            return json_response(
+                StatusCode::OK,
+                &json_rpc_error(
+                    req["id"].as_i64(),
+                    -32602,
+                    "Miner not registered — call get_block_template first",
+                ),
+            );
+        }
+
+        // Validate nonce falls within the miner's assigned range
+        if !self
+            .block_templates
+            .is_nonce_valid_for_miner(&mining_hash, &miner_id, nonce)
+            .await
+        {
+            warn!(
+                target: LOG_TARGET,
+                "Submit rejected: nonce {nonce} outside assigned range for miner {miner_id}"
+            );
+            return json_response(
+                StatusCode::OK,
+                &json_rpc_error(req["id"].as_i64(), -32602, "Nonce outside assigned range"),
+            );
+        }
+
+        // Look up and remove the stored block template
         let mut block = match self.block_templates.take(&mining_hash).await {
             Some(b) => b,
             None => {
@@ -500,4 +701,159 @@ fn json_rpc_error(id: Option<i64>, code: i32, message: &str) -> Value {
             "message": message,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse_miner_id_from_request ---
+
+    #[test]
+    fn parse_miner_id_from_request_returns_wallet_address_when_present() {
+        let address = TariAddress::default();
+        let base58 = address.to_base58();
+        let req = json!({
+            "params": {
+                "wallet_address": base58
+            }
+        });
+        let dummy_addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
+        assert_eq!(parse_miner_id_from_request(&req, dummy_addr), format!("{}", address));
+    }
+
+    #[test]
+    fn parse_miner_id_from_request_returns_peer_addr_when_no_wallet() {
+        let req = json!({});
+        let peer_addr = "192.168.1.5:42000".parse::<SocketAddr>().unwrap();
+        assert_eq!(parse_miner_id_from_request(&req, peer_addr), "192.168.1.5:42000");
+    }
+
+    #[test]
+    fn parse_miner_id_from_request_generates_auto_id_when_peer_is_zero() {
+        let req = json!({});
+        let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let id = parse_miner_id_from_request(&req, zero_addr);
+        assert!(id.starts_with("auto_"));
+    }
+
+    #[test]
+    fn parse_miner_id_from_request_generates_unique_auto_ids() {
+        let req = json!({});
+        let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let id1 = parse_miner_id_from_request(&req, zero_addr);
+        let id2 = parse_miner_id_from_request(&req, zero_addr);
+        assert_ne!(id1, id2);
+    }
+
+    // --- parse_wallet_address_from_request ---
+
+    #[test]
+    fn parse_wallet_address_from_request_returns_none_for_empty_request() {
+        let req = json!({});
+        assert!(parse_wallet_address_from_request(&req).is_none());
+    }
+
+    #[test]
+    fn parse_wallet_address_from_request_returns_none_for_invalid_address() {
+        let req = json!({
+            "params": {
+                "wallet_address": "not_a_real_address"
+            }
+        });
+        assert!(parse_wallet_address_from_request(&req).is_none());
+    }
+
+    #[test]
+    fn parse_wallet_address_from_request_parses_valid_address() {
+        let address = TariAddress::default();
+        let base58 = address.to_base58();
+        let req = json!({
+            "params": {
+                "wallet_address": base58
+            }
+        });
+        let parsed = parse_wallet_address_from_request(&req).unwrap();
+        assert_eq!(parsed, address);
+    }
+
+    // --- build_tari_mining_blob ---
+
+    #[test]
+    fn build_tari_mining_blob_has_correct_length() {
+        let hash = [0x42u8; 32];
+        let blob = build_tari_mining_blob(&hash, 0, 2);
+        assert_eq!(blob.len(), 76);
+    }
+
+    #[test]
+    fn build_tari_mining_blob_starts_with_three_zero_bytes() {
+        let hash = [0x42u8; 32];
+        let blob = build_tari_mining_blob(&hash, 0, 2);
+        assert_eq!(&blob[0..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn build_tari_mining_blob_contains_hash_at_offset_3() {
+        let hash = [0xABu8; 32];
+        let blob = build_tari_mining_blob(&hash, 0, 2);
+        assert_eq!(&blob[3..35], &hash[..]);
+    }
+
+    #[test]
+    fn build_tari_mining_blob_encodes_nonce_as_big_endian() {
+        let hash = [0u8; 32];
+        let nonce: u64 = 0x01_02_03_04_05_06_07_08;
+        let blob = build_tari_mining_blob(&hash, nonce, 2);
+        assert_eq!(&blob[35..43], &nonce.to_be_bytes());
+    }
+
+    #[test]
+    fn build_tari_mining_blob_sets_pow_algo_at_offset_43() {
+        let hash = [0u8; 32];
+        let blob = build_tari_mining_blob(&hash, 0, POW_ALGO_RANDOMXT);
+        assert_eq!(blob[43], POW_ALGO_RANDOMXT);
+    }
+
+    #[test]
+    fn build_tari_mining_blob_trailing_bytes_are_zero() {
+        let hash = [0u8; 32];
+        let blob = build_tari_mining_blob(&hash, 0, 2);
+        assert_eq!(&blob[44..], &[0u8; 32]);
+    }
+
+    #[test]
+    fn build_tari_mining_blob_nonce_high_bytes_at_reserved_offset() {
+        let hash = [0u8; 32];
+        // nonce = 0x00000001_00000000 → high 4 bytes = 0x00000001
+        let nonce: u64 = 0x00000001_00000000;
+        let blob = build_tari_mining_blob(&hash, nonce, 2);
+        // TARI_BLOB_RESERVED_OFFSET is 35, bytes 35..39 are the high nonce bytes
+        assert_eq!(&blob[35..39], &[0x00, 0x00, 0x00, 0x01]);
+    }
+
+    // --- json_rpc_success / json_rpc_error ---
+
+    #[test]
+    fn json_rpc_success_contains_result_and_jsonrpc_version() {
+        let resp = json_rpc_success(Some(1), json!("ok"));
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["result"], "ok");
+        assert_eq!(resp["id"], 1);
+    }
+
+    #[test]
+    fn json_rpc_success_defaults_id_to_minus_one() {
+        let resp = json_rpc_success(None, json!("ok"));
+        assert_eq!(resp["id"], -1);
+    }
+
+    #[test]
+    fn json_rpc_error_contains_error_code_and_message() {
+        let resp = json_rpc_error(Some(2), -1, "bad");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["error"]["code"], -1);
+        assert_eq!(resp["error"]["message"], "bad");
+        assert_eq!(resp["id"], 2);
+    }
 }

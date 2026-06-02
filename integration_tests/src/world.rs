@@ -46,12 +46,8 @@ use tari_transaction_components::{
 use thiserror::Error;
 
 use crate::{
-    base_node_process::BaseNodeProcess,
-    get_base_dir,
-    merge_mining_proxy::MergeMiningProxyProcess,
-    miner::MinerProcess,
-    wallet_ffi::WalletFFI,
-    wallet_process::WalletProcess,
+    base_node_process::BaseNodeProcess, get_base_dir, merge_mining_proxy::MergeMiningProxyProcess, miner::MinerProcess,
+    wallet_ffi::WalletFFI, wallet_process::WalletProcess,
 };
 
 #[derive(Error, Debug)]
@@ -98,6 +94,10 @@ pub struct TariWorld {
     pub last_imported_tx_ids: Vec<u64>,
     // We need to store this for the merge mining proxy steps. The checks are get and check are done on separate steps.
     pub last_merge_miner_response: Value,
+    // Raw JSON-RPC response from xmrig proxy (for error-code assertions).
+    pub last_xmrig_proxy_response: Value,
+    // Stored block template blob for submitblock re-use across steps.
+    pub stored_block_template_blob: Option<Value>,
     // Used for offline signing integration test — stores prepared and signed transaction JSON between steps.
     pub offline_signing_prepared: Option<String>,
     pub offline_signing_signed: Option<String>,
@@ -178,6 +178,8 @@ impl TariWorld {
             errors: Default::default(),
             last_imported_tx_ids: vec![],
             last_merge_miner_response: Default::default(),
+            last_xmrig_proxy_response: Default::default(),
+            stored_block_template_blob: None,
             offline_signing_prepared: None,
             offline_signing_signed: None,
             offline_signer_keystores: Default::default(),

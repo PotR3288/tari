@@ -43,10 +43,65 @@ pub enum XmrigProxyError {
 
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    #[error("Miner authentication failed: {0}")]
+    #[allow(dead_code)]
+    MinerAuthError(String),
+
+    #[error("Miner validation failed: {0}")]
+    MinerValidationError(String),
+
+    #[error("Nonce out of assigned range: miner={0}, submitted={1}, range={2:?}")]
+    #[allow(dead_code)]
+    NonceOutOfRange(String, u64, std::ops::Range<u32>),
+
+    #[error("Max miners reached: {0}")]
+    MaxMinersReached(usize),
 }
 
 impl XmrigProxyError {
     pub fn status_code(&self) -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
+        match self {
+            Self::MinerAuthError(_) => StatusCode::UNAUTHORIZED,
+            Self::MinerValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::NonceOutOfRange(_, _, _) => StatusCode::BAD_REQUEST,
+            Self::MaxMinersReached(_) => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn miner_auth_error_returns_unauthorized() {
+        let err = XmrigProxyError::MinerAuthError("test".into());
+        assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn miner_validation_error_returns_bad_request() {
+        let err = XmrigProxyError::MinerValidationError("test".into());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn nonce_out_of_range_returns_bad_request() {
+        let err = XmrigProxyError::NonceOutOfRange("m".into(), 0, 0..100);
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn max_miners_reached_returns_service_unavailable() {
+        let err = XmrigProxyError::MaxMinersReached(32);
+        assert_eq!(err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn legacy_errors_still_return_internal_server_error() {
+        let err = XmrigProxyError::InternalError("test".into());
+        assert_eq!(err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
