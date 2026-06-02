@@ -21,21 +21,30 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use log::debug;
+use log::{info, debug};
+use tari_common_types::tari_address::TariAddress;
 use tari_node_components::blocks::Block;
 use tokio::sync::RwLock;
+
+use super::MinerId;
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::storage";
 const MAX_TEMPLATE_AGE: Duration = Duration::from_secs(20 * 60); // 20 minutes
 
-struct TemplateEntry {
-    block: Block,
-    inserted_at: Instant,
+/// Entry stored in the template cache.
+#[derive(Clone)]
+pub struct TemplateEntry {
+    pub block: Block,
+    pub inserted_at: Instant,
+    pub wallet_address: TariAddress,
+    pub assigned_miners: HashSet<MinerId>,
+    pub nonce_ranges: HashMap<MinerId, Range<u32>>,
 }
 
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
@@ -54,13 +63,94 @@ impl BlockTemplateStorage {
     }
 
     /// Store a block template. If a template with the same key already exists it is replaced.
-    pub async fn store(&self, key: [u8; 32], block: Block) {
+    pub async fn store(
+        &self,
+        key: [u8; 32],
+        block: Block,
+        wallet_address: TariAddress,
+        miner_id: MinerId,
+        nonce_range: Range<u32>,
+        
+    ) {
+        info!(target: LOG_TARGET, "Storing template for address and miner ID with nonce range ");
         let mut map = self.inner.write().await;
-        map.insert(key, TemplateEntry {
-            block,
-            inserted_at: Instant::now(),
-        });
+        map.insert(
+            key,
+            TemplateEntry {
+                block,
+                inserted_at: Instant::now(),
+                wallet_address,
+                assigned_miners: {
+                    let mut set = HashSet::new();
+                    set.insert(miner_id.clone());
+                    set
+                },
+                nonce_ranges: {
+                    let mut hm = HashMap::new();
+                    hm.insert(miner_id, nonce_range);
+                    hm
+                },
+            },
+        );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
+
+    }
+
+    /// Look up a cached template by wallet address.
+    ///
+    /// Returns `Some((key, TemplateEntry))` if a template for the given address exists and is still fresh
+    /// (younger than [`MAX_TEMPLATE_AGE`]). Returns `None` if no match or if the template is stale.
+    pub async fn get_for_address(&self, wallet_address: &TariAddress) -> Option<([u8; 32], TemplateEntry)> {
+        let map = self.inner.read().await;
+        let now = Instant::now();
+
+        for (key, entry) in map.iter() {
+            if entry.wallet_address == *wallet_address && now.duration_since(entry.inserted_at) < MAX_TEMPLATE_AGE {
+                return Some((*key, entry.clone()));
+            }
+        }
+        None
+    }
+
+    /// Add a new miner to an existing template entry (template caching hit).
+    ///
+    /// Returns `true` if the template was found and the miner was added.
+    pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u32>) -> bool {
+        let mut map = self.inner.write().await;
+        if let Some(entry) = map.get_mut(&key) {
+            entry.assigned_miners.insert(miner_id.clone());
+            entry.nonce_ranges.insert(miner_id, nonce_range);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Retrieve a clone of the stored block for the given mining hash (without removing it).
+    pub async fn get(&self, mining_hash: &[u8; 32]) -> Option<Block> {
+        let map = self.inner.read().await;
+        map.get(mining_hash).map(|entry| entry.block.clone())
+    }
+
+    /// Retrieve a clone of the full template entry for the given mining hash.
+    #[allow(dead_code)]
+    pub async fn get_entry(&self, mining_hash: &[u8; 32]) -> Option<TemplateEntry> {
+        let map = self.inner.read().await;
+        map.get(mining_hash).cloned()
+    }
+
+    /// Check whether the given miner is assigned to the template and whether the nonce falls within its range.
+    pub async fn is_nonce_valid_for_miner(&self, mining_hash: &[u8; 32], miner_id: &str, nonce: u64) -> bool {
+        let map = self.inner.read().await;
+        let entry = match map.get(mining_hash) {
+            Some(e) => e,
+            None => return false,
+        };
+        let range = match entry.nonce_ranges.get(miner_id) {
+            Some(r) => r,
+            None => return false,
+        };
+        ((range.start as u64)..(range.end as u64)).contains(&nonce)
     }
 
     /// Retrieve and remove a block template by its mining hash key.
@@ -85,5 +175,202 @@ impl BlockTemplateStorage {
 impl Default for BlockTemplateStorage {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tari_node_components::blocks::BlockBuilder;
+
+    fn make_test_block() -> Block {
+        BlockBuilder::new(1).build()
+    }
+
+    fn make_test_key() -> [u8; 32] {
+        [42u8; 32]
+    }
+
+    /// Helper to mutate `inserted_at` on a stored template so we can simulate age.
+    async fn set_template_age(storage: &BlockTemplateStorage, key: [u8; 32], duration: Duration) {
+        let mut map = storage.inner.write().await;
+        if let Some(entry) = map.get_mut(&key) {
+            entry.inserted_at = Instant::now() - duration;
+        }
+    }
+
+    #[tokio::test]
+    async fn store_and_get_block() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let block = make_test_block();
+        let address = TariAddress::default();
+        let miner = "miner_1".to_string();
+
+        storage.store(key, block.clone(), address, miner, 0..1000).await;
+
+        let retrieved = storage.get(&key).await.unwrap();
+        assert_eq!(retrieved, block);
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_missing_key() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        assert!(storage.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_removes_block() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let block = make_test_block();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, block.clone(), address, "m".to_string(), 0..1000)
+            .await;
+
+        let taken = storage.take(&key).await.unwrap();
+        assert_eq!(taken, block);
+        assert!(storage.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_returns_none_when_absent() {
+        let storage = BlockTemplateStorage::new();
+        assert!(storage.take(&make_test_key()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_for_address_returns_fresh_template() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000)
+            .await;
+
+        let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
+        assert_eq!(found_key, key);
+        assert_eq!(entry.wallet_address, address);
+    }
+
+    #[tokio::test]
+    async fn get_for_address_returns_none_for_stale_template() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000)
+            .await;
+        // Age the template beyond MAX_TEMPLATE_AGE
+        set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
+
+        assert!(storage.get_for_address(&address).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn add_miner_to_template_on_cache_hit() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000)
+            .await;
+
+        let added = storage
+            .add_miner_to_template(key, "miner_b".to_string(), 1000..2000)
+            .await;
+        assert!(added);
+
+        let entry = storage.get_entry(&key).await.unwrap();
+        assert!(entry.assigned_miners.contains("miner_a"));
+        assert!(entry.assigned_miners.contains("miner_b"));
+        assert!(entry.nonce_ranges.contains_key("miner_a"));
+        assert!(entry.nonce_ranges.contains_key("miner_b"));
+    }
+
+    #[tokio::test]
+    async fn nonce_validation_accepts_in_range_nonce() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address, "m".to_string(), 100..200)
+            .await;
+
+        assert!(storage.is_nonce_valid_for_miner(&key, "m", 150).await);
+    }
+
+    #[tokio::test]
+    async fn nonce_validation_rejects_out_of_range_nonce() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address, "m".to_string(), 0..100)
+            .await;
+
+        assert!(!storage.is_nonce_valid_for_miner(&key, "m", 999).await);
+    }
+
+    #[tokio::test]
+    async fn nonce_validation_rejects_unknown_miner() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address, "m".to_string(), 0..100)
+            .await;
+
+        assert!(!storage.is_nonce_valid_for_miner(&key, "unknown", 50).await);
+    }
+
+    #[tokio::test]
+    async fn remove_outdated_keeps_fresh_templates() {
+        let storage = BlockTemplateStorage::new();
+        let key1 = [1u8; 32];
+        let key2 = [2u8; 32];
+        let address = TariAddress::default();
+
+        storage
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100)
+            .await;
+        storage
+            .store(key2, make_test_block(), address, "m".to_string(), 0..100)
+            .await;
+
+        // Age only key1
+        set_template_age(&storage, key1, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
+
+        storage.remove_outdated().await;
+
+        assert!(storage.get(&key1).await.is_none());
+        assert!(storage.get(&key2).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn store_replaces_existing_template() {
+        let storage = BlockTemplateStorage::new();
+        let key = make_test_key();
+        let address = TariAddress::default();
+
+        storage
+            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100)
+            .await;
+        storage
+            .store(key, make_test_block(), address, "m2".to_string(), 0..100)
+            .await;
+
+        let entry = storage.get_entry(&key).await.unwrap();
+        assert!(!entry.assigned_miners.contains("m1"));
+        assert!(entry.assigned_miners.contains("m2"));
     }
 }
