@@ -46,7 +46,7 @@ pub fn json_response(status: StatusCode, body: &Value) -> Result<Response<ProxyB
 /// The Hyper service that handles incoming XMRig connections.
 #[derive(Clone)]
 pub struct XmrigProxyService {
-    inner: InnerService,
+    pub(crate) inner: InnerService,
 }
 
 impl XmrigProxyService {

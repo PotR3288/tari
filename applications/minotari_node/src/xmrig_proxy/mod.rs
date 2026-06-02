@@ -23,9 +23,14 @@
 mod block_template_storage;
 mod error;
 mod inner;
+mod miner_registry;
+mod nonce_partition;
 mod service;
 
-use std::time::Duration;
+/// Miner identity key — the `extra_nonce` hex string sent by XMRig.
+pub(crate) type MinerId = String;
+
+use std::{sync::Arc, time::Duration};
 
 use futures::FutureExt;
 use hyper::server::conn::http1;
@@ -40,8 +45,15 @@ use tari_core::{
 use tari_shutdown::ShutdownSignal;
 use tari_transaction_components::transaction_components::RangeProofType;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 
-use self::{block_template_storage::BlockTemplateStorage, inner::InnerService, service::XmrigProxyService};
+use self::{
+    block_template_storage::BlockTemplateStorage,
+    inner::InnerService,
+    miner_registry::{MinerRegistry, MinerRegistryConfig},
+    nonce_partition::NoncePartitioner,
+    service::XmrigProxyService,
+};
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
 const CLEANUP_INTERVAL_SECS: u64 = 10 * 60;
@@ -74,12 +86,33 @@ pub async fn run_xmrig_proxy(
     let listen_addr = multiaddr_to_socketaddr(&listener_address)?;
     let block_templates = BlockTemplateStorage::new();
 
-    // Periodic cleanup of expired templates
+    // Create shared miner registry and nonce partitioner before spawning cleanup tasks
+    let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+        default_payment_address: wallet_payment_address.clone(),
+        max_miners: 128,
+        miner_timeout_secs: 300,
+        allow_custom_payment: true,
+        min_nonce_range_size: 65536,
+    });
+    let nonce_partitioner = Arc::new(RwLock::new(NoncePartitioner::new()));
+
+    // Periodic cleanup of expired templates and stale miners
     let cleanup_storage = block_templates.clone();
+    let cleanup_registry = miner_registry.clone();
+    let cleanup_partitioner = nonce_partitioner.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         loop {
             interval.tick().await;
+            // Evict stale miners and reclaim their nonce ranges
+            let evicted_ids = cleanup_registry.evict_stale().await;
+            if !evicted_ids.is_empty() {
+                let mut partitioner = cleanup_partitioner.write().await;
+                for id in evicted_ids {
+                    partitioner.reclaim(&id);
+                }
+            }
+            // Remove outdated templates
             if let Err(e) = std::panic::AssertUnwindSafe(cleanup_storage.remove_outdated())
                 .catch_unwind()
                 .await
@@ -94,9 +127,13 @@ pub async fn run_xmrig_proxy(
         consensus_rules,
         state_machine,
         block_templates,
+        miner_registry,
+        nonce_partitioner,
         wallet_payment_address,
         coinbase_extra,
         range_proof_type,
+        // Placeholder — overwritten per-connection with the real remote address
+        peer_addr: "0.0.0.0:0".parse().unwrap(),
     });
 
     match TcpListener::bind(listen_addr).await {
@@ -118,7 +155,10 @@ pub async fn run_xmrig_proxy(
                         match result {
                             Ok((tcp, addr)) => {
                                 info!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
-                                let svc = service.clone();
+                                // Clone the inner service and set peer_addr to the real remote address
+                                let mut inner = service.inner.clone();
+                                inner.peer_addr = addr;
+                                let svc = XmrigProxyService::new(inner);
                                 let io = TokioIo::new(tcp);
                                 tokio::task::spawn(async move {
                                     if let Err(e) = http1::Builder::new().serve_connection(io, &svc).await {
