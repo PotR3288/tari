@@ -45,6 +45,8 @@ pub struct TemplateEntry {
     pub wallet_address: TariAddress,
     pub assigned_miners: HashSet<MinerId>,
     pub nonce_ranges: HashMap<MinerId, Range<u32>>,
+    /// Difficulty from the node's block template (used for miner responses).
+    pub target_difficulty: u64,
 }
 
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
@@ -70,9 +72,9 @@ impl BlockTemplateStorage {
         wallet_address: TariAddress,
         miner_id: MinerId,
         nonce_range: Range<u32>,
-        
+        target_difficulty: u64,
     ) {
-        info!(target: LOG_TARGET, "Storing template for address and miner ID with nonce range ");
+        info!(target: LOG_TARGET, "Storing template for address {} and miner ID {} with nonce range {:?}", miner_id.clone(), wallet_address.clone(), nonce_range.clone());
         let mut map = self.inner.write().await;
         map.insert(
             key,
@@ -90,6 +92,7 @@ impl BlockTemplateStorage {
                     hm.insert(miner_id, nonce_range);
                     hm
                 },
+                target_difficulty,
             },
         );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
@@ -116,6 +119,7 @@ impl BlockTemplateStorage {
     ///
     /// Returns `true` if the template was found and the miner was added.
     pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u32>) -> bool {
+        info!(target: LOG_TARGET, "Storing template for miner ID {} with nonce range {:?}", miner_id.clone(), nonce_range.clone());
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&key) {
             entry.assigned_miners.insert(miner_id.clone());
@@ -139,18 +143,10 @@ impl BlockTemplateStorage {
         map.get(mining_hash).cloned()
     }
 
-    /// Check whether the given miner is assigned to the template and whether the nonce falls within its range.
-    pub async fn is_nonce_valid_for_miner(&self, mining_hash: &[u8; 32], miner_id: &str, nonce: u64) -> bool {
+    /// Retrieve the target difficulty for a stored template.
+    pub async fn get_target_difficulty(&self, mining_hash: &[u8; 32]) -> Option<u64> {
         let map = self.inner.read().await;
-        let entry = match map.get(mining_hash) {
-            Some(e) => e,
-            None => return false,
-        };
-        let range = match entry.nonce_ranges.get(miner_id) {
-            Some(r) => r,
-            None => return false,
-        };
-        ((range.start as u64)..(range.end as u64)).contains(&nonce)
+        map.get(mining_hash).map(|entry| entry.target_difficulty)
     }
 
     /// Retrieve and remove a block template by its mining hash key.
@@ -207,7 +203,7 @@ mod tests {
         let address = TariAddress::default();
         let miner = "miner_1".to_string();
 
-        storage.store(key, block.clone(), address, miner, 0..1000).await;
+        storage.store(key, block.clone(), address, miner, 0..1000, 1).await;
 
         let retrieved = storage.get(&key).await.unwrap();
         assert_eq!(retrieved, block);
@@ -228,7 +224,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, block.clone(), address, "m".to_string(), 0..1000)
+            .store(key, block.clone(), address, "m".to_string(), 0..1000, 1)
             .await;
 
         let taken = storage.take(&key).await.unwrap();
@@ -249,7 +245,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1)
             .await;
 
         let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
@@ -264,7 +260,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1)
             .await;
         // Age the template beyond MAX_TEMPLATE_AGE
         set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
@@ -279,7 +275,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000)
+            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000, 1)
             .await;
 
         let added = storage
@@ -295,45 +291,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonce_validation_accepts_in_range_nonce() {
-        let storage = BlockTemplateStorage::new();
-        let key = make_test_key();
-        let address = TariAddress::default();
-
-        storage
-            .store(key, make_test_block(), address, "m".to_string(), 100..200)
-            .await;
-
-        assert!(storage.is_nonce_valid_for_miner(&key, "m", 150).await);
-    }
-
-    #[tokio::test]
-    async fn nonce_validation_rejects_out_of_range_nonce() {
-        let storage = BlockTemplateStorage::new();
-        let key = make_test_key();
-        let address = TariAddress::default();
-
-        storage
-            .store(key, make_test_block(), address, "m".to_string(), 0..100)
-            .await;
-
-        assert!(!storage.is_nonce_valid_for_miner(&key, "m", 999).await);
-    }
-
-    #[tokio::test]
-    async fn nonce_validation_rejects_unknown_miner() {
-        let storage = BlockTemplateStorage::new();
-        let key = make_test_key();
-        let address = TariAddress::default();
-
-        storage
-            .store(key, make_test_block(), address, "m".to_string(), 0..100)
-            .await;
-
-        assert!(!storage.is_nonce_valid_for_miner(&key, "unknown", 50).await);
-    }
-
-    #[tokio::test]
     async fn remove_outdated_keeps_fresh_templates() {
         let storage = BlockTemplateStorage::new();
         let key1 = [1u8; 32];
@@ -341,10 +298,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100)
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1)
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 0..100)
+            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1)
             .await;
 
         // Age only key1
@@ -363,10 +320,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100)
+            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100, 1)
             .await;
         storage
-            .store(key, make_test_block(), address, "m2".to_string(), 0..100)
+            .store(key, make_test_block(), address, "m2".to_string(), 0..100, 1)
             .await;
 
         let entry = storage.get_entry(&key).await.unwrap();
