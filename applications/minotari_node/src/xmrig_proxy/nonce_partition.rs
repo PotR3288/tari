@@ -24,9 +24,9 @@ use std::ops::Range;
 
 use super::MinerId;
 
-/// Full 32-bit nonce space
+/// Full 32-bit nonce space (0x00000000..u32::MAX covers all u32 values)
 const NONCE_SPACE_START: u32 = 0x00000000;
-const NONCE_SPACE_END: u32 = 0xFFFFFFFF;
+const NONCE_SPACE_END: u32 = u32::MAX;
 
 /// Minimum nonces per miner (65,536) — below this, reject new miners
 const MIN_NONCE_RANGE_SIZE: u32 = 0x10000;
@@ -53,10 +53,12 @@ impl NoncePartitioner {
     /// Returns `None` if remaining space is below `MIN_NONCE_RANGE_SIZE`.
     ///
     /// **Solo miner optimization:** if this is the only miner, it receives the full
-    /// 32-bit nonce space (`0x00000000..0xFFFFFFFF`).
+    /// 32-bit nonce space (`0x00000000..u32::MAX`).
     ///
     /// **Multi-miner strategy:** divide the space evenly among all active miners,
-    /// re-partitioning existing ranges so that no two miners overlap.
+    /// re-partitioning existing ranges so that no two miners overlap. Existing
+    /// miners are sorted by ID before partitioning so each miner consistently gets
+    /// the same range regardless of HashMap iteration randomness.
     pub fn assign(&mut self, miner_id: &MinerId) -> Option<Range<u32>> {
         // Solo miner gets the full range
         if self.allocations.is_empty() {
@@ -71,17 +73,21 @@ impl NoncePartitioner {
         }
 
         let n = (self.allocations.len() + 1) as u32; // including the new miner
-        let range_size = NONCE_SPACE_END / n;
+        // Use u64 to compute total_space without overflow when NONCE_SPACE_END == u32::MAX
+        let range_size = ((NONCE_SPACE_END as u64 + 1) / n as u64) as u32;
 
         // If the per-miner slice is too small, reject
         if range_size < MIN_NONCE_RANGE_SIZE {
             return None;
         }
 
-        // Re-partition: shrink all existing ranges to equal slots so nothing overlaps
-        let existing_ids: Vec<MinerId> = self.allocations.keys().cloned().collect();
-        for (i, id) in existing_ids.iter().enumerate() {
-            let start = (i as u32).saturating_mul(range_size);
+        // Re-partition: sort IDs so each miner consistently gets the same slot
+        // regardless of HashMap iteration order or insertion sequence.
+        let mut sorted_ids: Vec<MinerId> = self.allocations.keys().cloned().collect();
+        sorted_ids.sort_unstable();
+
+        for (i, id) in sorted_ids.iter().enumerate() {
+            let start = NONCE_SPACE_START.saturating_add((i as u32).saturating_mul(range_size));
             let end = start.saturating_add(range_size);
             if let Some(entry) = self.allocations.get_mut(id) {
                 *entry = start..end;
@@ -89,14 +95,16 @@ impl NoncePartitioner {
         }
 
         // Assign new miner to the next slot
-        let slot_index = existing_ids.len();
-        let start = (slot_index as u32).saturating_mul(range_size);
+        let slot_index = sorted_ids.len();
+        let start = NONCE_SPACE_START.saturating_add((slot_index as u32).saturating_mul(range_size));
         let end = start.saturating_add(range_size);
 
-        if start == NONCE_SPACE_END {
+        if start >= NONCE_SPACE_END {
             return None;
         }
 
+        // Clamp the last miner's range to the nonce space boundary
+        let end = end.min(NONCE_SPACE_END);
         let range = start..end;
         self.allocations.insert(miner_id.clone(), range.clone());
         Some(range)
@@ -220,7 +228,14 @@ mod tests {
     #[test]
     fn ranges_do_not_overlap() {
         let mut p = NoncePartitioner::new();
-        let ranges: Vec<Range<u32>> = (0..32).map(|i| p.assign(&format!("m{i}")).unwrap()).collect();
+        for i in 0..32 {
+            p.assign(&format!("m{i}")).unwrap();
+        }
+
+        // Check stored ranges (not captured return values, which become stale after re-partitioning)
+        let ranges: Vec<Range<u32>> = (0..32)
+            .map(|i| p.get_range(&format!("m{i}")).expect("miner should have a range"))
+            .collect();
 
         for i in 0..ranges.len() {
             for j in (i + 1)..ranges.len() {

@@ -24,7 +24,6 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use tari_common_types::tari_address::TariAddress;
 use tokio::sync::RwLock;
-use log::{info, debug};
 
 use super::MinerId;
 use crate::xmrig_proxy::error::XmrigProxyError;
@@ -179,11 +178,6 @@ impl MinerRegistry {
     #[allow(dead_code)]
     pub async fn would_exceed_cap(&self) -> bool {
         self.inner.read().await.len() >= self.config.max_miners
-    }
-
-    /// Check whether a miner is currently registered.
-    pub async fn is_registered(&self, miner_id: &MinerId) -> bool {
-        self.inner.read().await.contains_key(miner_id)
     }
 }
 
