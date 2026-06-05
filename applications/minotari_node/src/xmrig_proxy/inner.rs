@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::atomic::{AtomicU64, Ordering}, sync::Arc};
 
 use hyper::{Response, StatusCode, body::Bytes};
 use log::{debug, info, trace, warn};
@@ -111,14 +111,17 @@ fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
         return peer_addr.to_string();
     }
 
-    // Layer 3: auto-generated unique ID
+    // Layer 3: auto-generated unique ID — monotonic counter guarantees uniqueness
+    // even when calls land in the same millisecond.
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     format!(
         "auto_{}_{}",
+        id,
         std::time::SystemTime::now()
             .elapsed()
             .map(|d| d.as_millis())
-            .unwrap_or(0),
-        std::hash::Hasher::finish(&std::collections::hash_map::DefaultHasher::default())
+            .unwrap_or(0)
     )
 }
 
@@ -271,7 +274,7 @@ impl InnerService {
 
         let height = new_template.header.height;
         // Capture target_difficulty from the template before it's consumed by get_new_block
-        let _target_difficulty = new_template.target_difficulty.as_u64();
+        let target_difficulty = new_template.target_difficulty.as_u64();
 
         // Calculate the coinbase reward for this block
         let reward = self
@@ -420,6 +423,7 @@ impl InnerService {
                 payment_address.clone(),
                 miner_id.clone(),
                 nonce_range,
+                target_difficulty,
             )
             .await;
 
@@ -469,14 +473,7 @@ impl InnerService {
             .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
             .hash();
 
-        // Derive target difficulty from the consensus constants at this height
-        let target_difficulty = self
-            .consensus_rules
-            .consensus_constants(block_height)
-            .min_pow_difficulty(PowAlgorithm::RandomXT)
-            .as_u64();
-        let target_difficulty_bytes = target_difficulty.to_be_bytes();
-        let target_difficulty_val = u64::from_be_bytes(target_difficulty_bytes);
+        let target_difficulty_val = self.block_templates.get_target_difficulty(mining_hash_key).await.unwrap_or(600);
 
         // Calculate expected reward
         let expected_reward = self
@@ -576,47 +573,12 @@ impl InnerService {
         // Extract the 8-byte nonce from bytes 35..43 (big-endian u64)
         let nonce_bytes: [u8; 8] = blob
             .get(35..43)
-            .ok_or(XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?
+            .ok_or(XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?
             .try_into()
             .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
         let nonce = u64::from_be_bytes(nonce_bytes);
 
-        // Parse miner identity from request
-        let miner_id = parse_miner_id_from_request(req, self.peer_addr);
-
-        // Validate miner is registered
-        if !self.miner_registry.is_registered(&miner_id).await {
-            warn!(
-                target: LOG_TARGET,
-                "Submit rejected: miner {miner_id} not registered"
-            );
-            return json_response(
-                StatusCode::OK,
-                &json_rpc_error(
-                    req["id"].as_i64(),
-                    -32602,
-                    "Miner not registered — call get_block_template first",
-                ),
-            );
-        }
-
-        // Validate nonce falls within the miner's assigned range
-        if !self
-            .block_templates
-            .is_nonce_valid_for_miner(&mining_hash, &miner_id, nonce)
-            .await
-        {
-            warn!(
-                target: LOG_TARGET,
-                "Submit rejected: nonce {nonce} outside assigned range for miner {miner_id}"
-            );
-            return json_response(
-                StatusCode::OK,
-                &json_rpc_error(req["id"].as_i64(), -32602, "Nonce outside assigned range"),
-            );
-        }
-
-        // Look up and remove the stored block template
+        // Look up and remove the stored block template (prevents duplicate submissions)
         let mut block = match self.block_templates.take(&mining_hash).await {
             Some(b) => b,
             None => {
