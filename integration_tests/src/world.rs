@@ -98,6 +98,9 @@ pub struct TariWorld {
     pub last_xmrig_proxy_response: Value,
     // Stored block template blob for submitblock re-use across steps.
     pub stored_block_template_blob: Option<Value>,
+    /// Nonce ranges assigned to miners, keyed by miner identifier.
+    /// Populated by nonce partitioning integration tests.
+    pub miner_nonce_ranges: IndexMap<String, (u64, u64)>,
     // Used for offline signing integration test — stores prepared and signed transaction JSON between steps.
     pub offline_signing_prepared: Option<String>,
     pub offline_signing_signed: Option<String>,
@@ -180,6 +183,7 @@ impl TariWorld {
             last_merge_miner_response: Default::default(),
             last_xmrig_proxy_response: Default::default(),
             stored_block_template_blob: None,
+            miner_nonce_ranges: Default::default(),
             offline_signing_prepared: None,
             offline_signing_signed: None,
             offline_signer_keystores: Default::default(),
