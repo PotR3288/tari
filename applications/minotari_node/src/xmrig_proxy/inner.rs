@@ -95,23 +95,39 @@ struct ChainTip {
 
 /// Extract miner identity from a JSON-RPC request and peer address.
 ///
-/// Three-layer resolution:
-/// 1. `params.wallet_address` — if the miner supplies a valid Tari address, use its hex hash
-/// 2. `peer_addr` — fall back to the remote socket address (IP:port) of the TCP connection
-/// 3. Auto-generated — timestamp + random suffix (last resort for malformed requests)
+/// Four-layer resolution:
+/// 1. `params.extra_nonce` — per-connection random nonce sent by XMRig (Tari fork).
+///    Guarantees unique miner IDs even when multiple instances share the same wallet.
+/// 2. `params.wallet_address` — if present, use its base58 string as the MinerId.
+///    Falls back to this only for legacy clients that don't send extra_nonce.
+/// 3. `peer_addr` — fall back to the remote socket address (IP:port) of the TCP connection.
+/// 4. Auto-generated — monotonic counter + timestamp (last resort).
 fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
-    // Layer 1: wallet address from request
+    // Layer 1: per-connection extra_nonce from XMRig (Tari fork).
+    // This is the correct identity for nonce partitioning — each XMRig instance
+    // generates unique random bytes, so two miners with the same wallet get
+    // distinct IDs and non-overlapping nonce ranges.
+    if let Some(extra_nonce) = req
+        .get("params")
+        .and_then(|p| p.get("extra_nonce"))
+        .and_then(Value::as_str)
+    {
+        return extra_nonce.to_string();
+    }
+
+    // Layer 2: wallet address from request — legacy fallback for clients
+    // that don't send extra_nonce.
     if let Some(addr) = parse_wallet_address_from_request(req) {
         return format!("{}", addr);
     }
 
-    // Layer 2: peer socket address (IP:port) — distinguishes miners behind NAT
-    // sharing a wallet but on different local ports
+    // Layer 3: peer socket address (IP:port) — distinguishes miners behind NAT
+    // sharing a wallet but on different local ports.
     if peer_addr != SocketAddr::from(([0, 0, 0, 0], 0)) {
         return peer_addr.to_string();
     }
 
-    // Layer 3: auto-generated unique ID — monotonic counter guarantees uniqueness
+    // Layer 4: auto-generated unique ID — monotonic counter guarantees uniqueness
     // even when calls land in the same millisecond.
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -682,6 +698,32 @@ mod tests {
         });
         let dummy_addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
         assert_eq!(parse_miner_id_from_request(&req, dummy_addr), format!("{}", address));
+    }
+
+    #[test]
+    fn parse_miner_id_from_request_extra_nonce_takes_priority_over_wallet() {
+        let address = TariAddress::default();
+        let base58 = address.to_base58();
+        let req = json!({
+            "params": {
+                "wallet_address": base58,
+                "extra_nonce": "a1b2c3d4e5f60718"
+            }
+        });
+        let dummy_addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
+        // extra_nonce should win over wallet_address as miner identity
+        assert_eq!(parse_miner_id_from_request(&req, dummy_addr), "a1b2c3d4e5f60718");
+    }
+
+    #[test]
+    fn parse_miner_id_from_request_extra_nonce_priority_over_peer() {
+        let req = json!({
+            "params": {
+                "extra_nonce": "deadbeef12345678"
+            }
+        });
+        let peer_addr = "192.168.1.5:42000".parse::<SocketAddr>().unwrap();
+        assert_eq!(parse_miner_id_from_request(&req, peer_addr), "deadbeef12345678");
     }
 
     #[test]
