@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use tari_common_types::tari_address::TariAddress;
 use tokio::sync::RwLock;
@@ -31,12 +31,12 @@ use crate::xmrig_proxy::error::XmrigProxyError;
 /// Tracks a single registered miner's identity and connection state.
 #[derive(Clone, Debug)]
 pub struct MinerEntry {
-    /// Unique identifier (extra_nonce hex string).
+    /// Unique identifier (IP + wallet_address or auto-generated).
     #[allow(dead_code)]
     pub id: MinerId,
-    /// Remote socket address of the miner connection.
+    /// Remote IP address of the miner connection (port excluded for deduplication).
     #[allow(dead_code)]
-    pub remote_addr: SocketAddr,
+    pub remote_addr: IpAddr,
     /// Payment address for coinbase rewards (per-miner or config default).
     pub payment_address: TariAddress,
     /// Assigned nonce partition (filled by NoncePartitioner after registration).
@@ -91,7 +91,7 @@ impl MinerRegistry {
     pub async fn get_or_register(
         &self,
         miner_id: &MinerId,
-        remote_addr: SocketAddr,
+        remote_addr: IpAddr,
         payment_address: Option<TariAddress>,
     ) -> Result<MinerEntry, XmrigProxyError> {
         let mut map = self.inner.write().await;
@@ -195,8 +195,8 @@ mod tests {
         }
     }
 
-    fn dummy_addr() -> SocketAddr {
-        "127.0.0.1:0".parse().unwrap()
+    fn dummy_addr() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
     }
 
     #[tokio::test]
