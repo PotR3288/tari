@@ -35,7 +35,7 @@ use std::{sync::Arc, time::Duration};
 use futures::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
-use log::{error, info};
+use log::{error, debug, info};
 use tari_common_types::tari_address::TariAddress;
 use tari_comms::{multiaddr::Multiaddr, utils::multiaddr::multiaddr_to_socketaddr};
 use tari_core::{
@@ -154,7 +154,7 @@ pub async fn run_xmrig_proxy(
                     result = listener.accept() => {
                         match result {
                             Ok((tcp, addr)) => {
-                                info!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
+                                debug!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
                                 // Clone the inner service and set peer_addr to the real remote address
                                 let mut inner = service.inner.clone();
                                 inner.peer_addr = addr;
