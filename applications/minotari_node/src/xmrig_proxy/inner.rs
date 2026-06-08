@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tari_common_types::{
     tari_address::TariAddress,
     types::{
-        BlockHash, CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
+        CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
         UncompressedPublicKey,
     },
 };
@@ -51,7 +51,7 @@ use tokio::sync::RwLock;
 
 use super::{
     MinerId,
-    block_template_storage::BlockTemplateStorage,
+    block_template_storage::{BlockTemplateStorage, ChainTip},
     error::XmrigProxyError,
     miner_registry::MinerRegistry,
     nonce_partition::NoncePartitioner,
@@ -85,12 +85,6 @@ pub struct InnerService {
     pub nonce_partitioner: Arc<RwLock<NoncePartitioner>>,
     /// The remote socket address of the miner that opened this connection.
     pub peer_addr: SocketAddr,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ChainTip {
-    height: u64,
-    top_hash: BlockHash,
 }
 
 /// Extract miner identity from a JSON-RPC request and peer address.
@@ -276,6 +270,14 @@ impl InnerService {
         self.miner_registry
             .get_or_register(&registration_id, self.peer_addr.ip(), requested_wallet_address.clone())
             .await?;
+
+        // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
+        let current_tip = self.get_chain_tip().await?;
+        let advanced = self.block_templates.update_chain_tip(current_tip).await;
+        if advanced {
+            debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), invalidating all cached templates", current_tip.height, current_tip.top_hash);
+            self.block_templates.evict_all().await;
+        }
 
         // 4. Check template cache for existing template with same wallet address
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
