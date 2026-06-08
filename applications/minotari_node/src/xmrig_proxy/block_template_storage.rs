@@ -28,14 +28,37 @@ use std::{
 };
 
 use log::{info, debug};
-use tari_common_types::tari_address::TariAddress;
+use tari_common_types::{
+    tari_address::TariAddress,
+    types::BlockHash,
+};
 use tari_node_components::blocks::Block;
+use tari_utilities::ByteArray;
 use tokio::sync::RwLock;
 
 use super::MinerId;
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::storage";
 const MAX_TEMPLATE_AGE: Duration = Duration::from_secs(20 * 60); // 20 minutes
+
+/// Tracks the last known chain tip so we can detect when Tari's state has advanced.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChainTip {
+    pub height: u64,
+    pub top_hash: BlockHash,
+}
+
+impl ChainTip {
+    /// Returns `true` if the given tip represents an advance over this one.
+    fn is_advanced_by(&self, other: &ChainTip) -> bool {
+        other.height > self.height || (other.height == self.height && other.top_hash != self.top_hash)
+    }
+
+    /// Returns true if this chain tip has been initialized to a non-default value.
+    fn is_initialized(&self) -> bool {
+        self.height > 0 || !self.top_hash.as_bytes().iter().all(|&b| b == 0)
+    }
+}
 
 /// Entry stored in the template cache.
 #[derive(Clone)]
@@ -52,16 +75,39 @@ pub struct TemplateEntry {
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
 ///
 /// Templates are automatically expired after [`MAX_TEMPLATE_AGE`].
+/// Chain tip advances (new blocks found or reorgs) are tracked to detect stale caches early.
 #[derive(Clone)]
 pub struct BlockTemplateStorage {
     inner: Arc<RwLock<HashMap<[u8; 32], TemplateEntry>>>,
+    /// Last known chain tip — updated whenever we fetch a fresh template from Tari.
+    last_known_tip: Arc<RwLock<ChainTip>>,
 }
 
 impl BlockTemplateStorage {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            last_known_tip: Arc::new(RwLock::new(ChainTip::default())),
         }
+    }
+
+    /// Update the stored chain tip to the given value.
+    /// Returns `true` if the new tip represents an advance (height increased or top_hash changed).
+    /// The first call always returns `false` (initialization from default is not an "advance").
+    pub async fn update_chain_tip(&self, tip: ChainTip) -> bool {
+        let mut stored = self.last_known_tip.write().await;
+        if !stored.is_initialized() {
+            *stored = tip;
+            return false;
+        }
+        let advanced = stored.is_advanced_by(&tip);
+        *stored = tip;
+        advanced
+    }
+
+    /// Returns the current stored chain tip (height + top_hash).
+    pub async fn get_chain_tip(&self) -> ChainTip {
+        self.last_known_tip.read().await.clone()
     }
 
     /// Store a block template. If a template with the same key already exists it is replaced.
@@ -153,6 +199,15 @@ impl BlockTemplateStorage {
     pub async fn take(&self, key: &[u8; 32]) -> Option<Block> {
         let mut map = self.inner.write().await;
         map.remove(key).map(|e| e.block)
+    }
+
+    /// Evict all cached templates. Called when Tari's chain tip advances so that stale
+    /// templates are not served to miners on the next request.
+    pub async fn evict_all(&self) {
+        let mut map = self.inner.write().await;
+        let count = map.len();
+        map.clear();
+        debug!(target: LOG_TARGET, "Evicted all {} cached templates (chain tip advanced)", count);
     }
 
     /// Remove all templates older than [`MAX_TEMPLATE_AGE`].
@@ -329,5 +384,69 @@ mod tests {
         let entry = storage.get_entry(&key).await.unwrap();
         assert!(!entry.assigned_miners.contains("m1"));
         assert!(entry.assigned_miners.contains("m2"));
+    }
+
+    #[tokio::test]
+    async fn update_chain_tip_returns_true_on_height_advance() {
+        let storage = BlockTemplateStorage::new();
+        let tip1 = ChainTip { height: 10, top_hash: BlockHash::default() };
+        let tip2 = ChainTip { height: 11, top_hash: BlockHash::default() };
+
+        assert!(!storage.update_chain_tip(tip1).await); // first update is always "no advance" from default
+        assert!(storage.update_chain_tip(tip2).await);
+    }
+
+    #[tokio::test]
+    async fn update_chain_tip_returns_true_on_hash_change() {
+        let storage = BlockTemplateStorage::new();
+        let tip1 = ChainTip { height: 10, top_hash: [0u8; 32].into() };
+        let tip2 = ChainTip { height: 10, top_hash: [1u8; 32].into() };
+
+        storage.update_chain_tip(tip1).await;
+        assert!(storage.update_chain_tip(tip2).await); // same height, different hash
+    }
+
+    #[tokio::test]
+    async fn update_chain_tip_returns_false_on_same_tip() {
+        let storage = BlockTemplateStorage::new();
+        let tip = ChainTip { height: 10, top_hash: [42u8; 32].into() };
+
+        assert!(!storage.update_chain_tip(tip).await); // first update from default
+        assert!(!storage.update_chain_tip(tip).await); // same tip again
+    }
+
+    #[tokio::test]
+    async fn evict_all_clears_everything() {
+        let storage = BlockTemplateStorage::new();
+        let key1 = [1u8; 32];
+        let key2 = [2u8; 32];
+        let address = TariAddress::default();
+
+        storage
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1)
+            .await;
+        storage
+            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1)
+            .await;
+
+        assert!(storage.get(&key1).await.is_some());
+        assert!(storage.get(&key2).await.is_some());
+
+        storage.evict_all().await;
+
+        assert!(storage.get(&key1).await.is_none());
+        assert!(storage.get(&key2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn evict_all_does_not_affect_chain_tip() {
+        let storage = BlockTemplateStorage::new();
+        let tip = ChainTip { height: 42, top_hash: [99u8; 32].into() };
+        storage.update_chain_tip(tip).await;
+
+        storage.evict_all().await;
+
+        let stored = storage.get_chain_tip().await;
+        assert_eq!(stored.height, 42);
     }
 }
