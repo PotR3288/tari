@@ -105,11 +105,6 @@ impl BlockTemplateStorage {
         advanced
     }
 
-    /// Returns the current stored chain tip (height + top_hash).
-    pub async fn get_chain_tip(&self) -> ChainTip {
-        self.last_known_tip.read().await.clone()
-    }
-
     /// Store a block template. If a template with the same key already exists it is replaced.
     pub async fn store(
         &self,
@@ -446,7 +441,10 @@ mod tests {
 
         storage.evict_all().await;
 
-        let stored = storage.get_chain_tip().await;
-        assert_eq!(stored.height, 42);
+        // Verify the chain tip survived evict_all by checking that a subsequent
+        // update is still detected as an advance. If evict_all had cleared the
+        // stored tip, this call would return false (reset from default) instead of true.
+        let new_tip = ChainTip { height: 43, top_hash: [99u8; 32].into() };
+        assert!(storage.update_chain_tip(new_tip).await);
     }
 }
