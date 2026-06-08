@@ -104,11 +104,13 @@ pub async fn run_xmrig_proxy(
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         loop {
             interval.tick().await;
-            // Evict stale miners and reclaim their nonce ranges
-            let evicted_ids = cleanup_registry.evict_stale().await;
-            if !evicted_ids.is_empty() {
+            // Evict stale miners and reclaim their nonce ranges.
+            // evict_stale returns (registration_ids, nonce_partitioner_ids) — the former are removed
+            // from MinerRegistry internally; the latter must be reclaimed from NoncePartitioner.
+            let (_reg_ids, np_ids) = cleanup_registry.evict_stale().await;
+            if !np_ids.is_empty() {
                 let mut partitioner = cleanup_partitioner.write().await;
-                for id in evicted_ids {
+                for id in np_ids {
                     partitioner.reclaim(&id);
                 }
             }
