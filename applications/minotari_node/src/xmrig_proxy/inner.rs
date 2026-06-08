@@ -288,6 +288,11 @@ impl InnerService {
                         "No nonce space available".to_string(),
                     ))?;
 
+            // Record the mapping so eviction can reclaim this nonce range later.
+            self.miner_registry
+                .register_nonce_partitioner_id(&registration_id, &miner_id)
+                .await;
+
             self.block_templates
                 .add_miner_to_template(cached_key, miner_id.clone(), nonce_range)
                 .await;
@@ -458,6 +463,11 @@ impl InnerService {
                 .ok_or(XmrigProxyError::MinerValidationError(
                     "No nonce space available".to_string(),
                 ))?;
+
+        // Record the mapping so eviction can reclaim this nonce range later.
+        self.miner_registry
+            .register_nonce_partitioner_id(&registration_id, &miner_id)
+            .await;
 
         let mining_hash_key: [u8; 32] = mining_hash
             .as_slice()
