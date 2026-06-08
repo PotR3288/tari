@@ -277,6 +277,8 @@ impl InnerService {
         if advanced {
             debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), invalidating all cached templates", current_tip.height, current_tip.top_hash);
             self.block_templates.evict_all().await;
+            // Clear stale nonce allocations so the next template request gets a fresh partition.
+            self.nonce_partitioner.write().await.reset();
         }
 
         // 4. Check template cache for existing template with same wallet address

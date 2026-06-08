@@ -127,7 +127,6 @@ impl NoncePartitioner {
     }
 
     /// Reset all allocations (called on template invalidation / chain advance).
-    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.allocations.clear();
     }
