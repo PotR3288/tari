@@ -45,6 +45,7 @@ pub enum XmrigProxyError {
     InternalError(String),
 
     #[error("Miner authentication failed: {0}")]
+    // TODO: wire into handle() for optional auth token check (config-gated)
     #[allow(dead_code)]
     MinerAuthError(String),
 
@@ -52,6 +53,7 @@ pub enum XmrigProxyError {
     MinerValidationError(String),
 
     #[error("Nonce out of assigned range: miner={0}, submitted={1}, range={2:?}")]
+    // TODO: wire into handle_submit_block for nonce range verification (S2)
     #[allow(dead_code)]
     NonceOutOfRange(String, u64, std::ops::Range<u32>),
 

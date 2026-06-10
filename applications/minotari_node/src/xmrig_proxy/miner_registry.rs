@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use tari_common_types::tari_address::TariAddress;
 use tokio::sync::RwLock;
@@ -31,28 +31,12 @@ use crate::xmrig_proxy::error::XmrigProxyError;
 /// Tracks a single registered miner's identity and connection state.
 #[derive(Clone, Debug)]
 pub struct MinerEntry {
-    /// Unique identifier (IP + wallet_address or auto-generated).
-    #[allow(dead_code)]
-    pub id: MinerId,
-    /// Remote IP address of the miner connection (port excluded for deduplication).
-    #[allow(dead_code)]
-    pub remote_addr: IpAddr,
     /// Payment address for coinbase rewards (per-miner or config default).
     pub payment_address: TariAddress,
-    /// Assigned nonce partition (filled by NoncePartitioner after registration).
-    #[allow(dead_code)]
-    pub nonce_range: std::ops::Range<u32>,
-    /// Mining hash key of the template this miner is assigned to (if any).
-    #[allow(dead_code)]
-    pub assigned_template: Option<[u8; 32]>,
-    /// When the miner first connected.
-    #[allow(dead_code)]
-    pub connected_at: Instant,
     /// Last time the miner sent a valid request.
     pub last_activity: Instant,
     /// Nonce-partitioning IDs associated with this registration (extra_nonce or peer socket).
     /// Used by eviction to reclaim nonce ranges from NoncePartitioner.
-    #[allow(dead_code)]
     pub nonce_partitioner_ids: Vec<MinerId>,
 }
 
@@ -68,6 +52,7 @@ pub struct MinerRegistryConfig {
     /// Whether miners may supply their own payment address.
     pub allow_custom_payment: bool,
     /// Minimum nonce range size per miner (used by NoncePartitioner, stored here for config centralization).
+    // TODO: wire into NoncePartitioner::assign() as dynamic minimum instead of hard-coded MIN_NONCE_RANGE_SIZE
     #[allow(dead_code)]
     pub min_nonce_range_size: u32,
 }
@@ -95,7 +80,6 @@ impl MinerRegistry {
     pub async fn get_or_register(
         &self,
         miner_id: &MinerId,
-        remote_addr: IpAddr,
         payment_address: Option<TariAddress>,
     ) -> Result<MinerEntry, XmrigProxyError> {
         let mut map = self.inner.write().await;
@@ -131,12 +115,7 @@ impl MinerRegistry {
 
         let now = Instant::now();
         let entry = MinerEntry {
-            id: miner_id.clone(),
-            remote_addr,
             payment_address: resolved_address,
-            nonce_range: 0..0, // placeholder — assigned by NoncePartitioner in step 3
-            assigned_template: None,
-            connected_at: now,
             last_activity: now,
             nonce_partitioner_ids: Vec::new(),
         };
@@ -148,6 +127,7 @@ impl MinerRegistry {
     }
 
     /// Remove a miner and return its entry (for nonce range reclamation).
+    // TODO: call on miner disconnect for clean cleanup
     #[allow(dead_code)]
     pub async fn unregister(&self, miner_id: &MinerId) -> Option<MinerEntry> {
         self.inner.write().await.remove(miner_id)
@@ -155,7 +135,6 @@ impl MinerRegistry {
 
     /// Record that a nonce-partitioning `miner_id` (extra_nonce or peer socket) belongs to this registration.
     /// Called when NoncePartitioner assigns a range so eviction can reclaim it later.
-    #[allow(dead_code)]
     pub async fn register_nonce_partitioner_id(&self, registration_id: &MinerId, miner_id: &MinerId) {
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(registration_id) {
@@ -168,7 +147,6 @@ impl MinerRegistry {
     /// Remove all miners inactive for longer than `config.miner_timeout_secs`.
     /// Returns a tuple of (registration_ids, nonce_partitioner_ids) so the caller can
     /// evict from both MinerRegistry and NoncePartitioner.
-    #[allow(dead_code)]
     pub async fn evict_stale(&self) -> (Vec<MinerId>, Vec<MinerId>) {
         let mut map = self.inner.write().await;
         let timeout = std::time::Duration::from_secs(self.config.miner_timeout_secs);
@@ -193,15 +171,10 @@ impl MinerRegistry {
     }
 
     /// Get current miner count.
+    // TODO: expose via getinfo or metrics endpoint
     #[allow(dead_code)]
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
-    }
-
-    /// Check if adding one more miner would exceed the cap.
-    #[allow(dead_code)]
-    pub async fn would_exceed_cap(&self) -> bool {
-        self.inner.read().await.len() >= self.config.max_miners
     }
 }
 
@@ -219,36 +192,30 @@ mod tests {
         }
     }
 
-    fn dummy_addr() -> IpAddr {
-        "127.0.0.1".parse().unwrap()
-    }
-
     #[tokio::test]
     async fn register_new_miner() {
         let registry = MinerRegistry::new(make_config());
         let entry = registry
-            .get_or_register(&"miner1".to_string(), dummy_addr(), None)
+            .get_or_register(&"miner1".to_string(), None)
             .await
             .unwrap();
-        assert_eq!(entry.id, "miner1");
-        assert_eq!(registry.len().await, 1);
+        assert_eq!(entry.payment_address, TariAddress::default());
     }
 
     #[tokio::test]
     async fn re_register_existing_miner_refreshes_activity() {
         let registry = MinerRegistry::new(make_config());
         let e1 = registry
-            .get_or_register(&"m".to_string(), dummy_addr(), None)
+            .get_or_register(&"m".to_string(), None)
             .await
             .unwrap();
         let old_activity = e1.last_activity;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let e2 = registry
-            .get_or_register(&"m".to_string(), dummy_addr(), None)
+            .get_or_register(&"m".to_string(), None)
             .await
             .unwrap();
         assert!(e2.last_activity > old_activity);
-        assert_eq!(registry.len().await, 1);
     }
 
     #[tokio::test]
@@ -257,15 +224,15 @@ mod tests {
         config.max_miners = 2;
         let registry = MinerRegistry::new(config);
         registry
-            .get_or_register(&"a".to_string(), dummy_addr(), None)
+            .get_or_register(&"a".to_string(), None)
             .await
             .unwrap();
         registry
-            .get_or_register(&"b".to_string(), dummy_addr(), None)
+            .get_or_register(&"b".to_string(), None)
             .await
             .unwrap();
         let err = registry
-            .get_or_register(&"c".to_string(), dummy_addr(), None)
+            .get_or_register(&"c".to_string(), None)
             .await
             .unwrap_err();
         assert!(matches!(err, XmrigProxyError::MaxMinersReached(2)));
@@ -275,12 +242,11 @@ mod tests {
     async fn unregister_returns_entry() {
         let registry = MinerRegistry::new(make_config());
         registry
-            .get_or_register(&"x".to_string(), dummy_addr(), None)
+            .get_or_register(&"x".to_string(), None)
             .await
             .unwrap();
         let entry = registry.unregister(&"x".to_string()).await.unwrap();
-        assert_eq!(entry.id, "x");
-        assert_eq!(registry.len().await, 0);
+        assert_eq!(entry.payment_address, TariAddress::default());
     }
 
     #[tokio::test]
@@ -289,7 +255,7 @@ mod tests {
         config.miner_timeout_secs = 1;
         let registry = MinerRegistry::new(config);
         registry
-            .get_or_register(&"old".to_string(), dummy_addr(), None)
+            .get_or_register(&"old".to_string(), None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -298,7 +264,6 @@ mod tests {
         assert_eq!(reg_ids[0], "old");
         // No nonce_partitioner_ids were registered, so this should be empty.
         assert_eq!(np_ids.len(), 0);
-        assert_eq!(registry.len().await, 0);
     }
 
     #[tokio::test]
@@ -308,7 +273,7 @@ mod tests {
         let registry = MinerRegistry::new(config);
         // Register a miner with both registration and nonce-partitioner IDs.
         registry
-            .get_or_register(&"reg_1".to_string(), dummy_addr(), None)
+            .get_or_register(&"reg_1".to_string(), None)
             .await
             .unwrap();
         registry.register_nonce_partitioner_id(&"reg_1".to_string(), &"np_deadbeef".to_string()).await;
@@ -321,18 +286,5 @@ mod tests {
         assert_eq!(np_ids.len(), 2);
         assert!(np_ids.contains(&"np_deadbeef".to_string()));
         assert!(np_ids.contains(&"np_cafe0000".to_string()));
-    }
-
-    #[tokio::test]
-    async fn would_exceed_cap() {
-        let mut config = make_config();
-        config.max_miners = 1;
-        let registry = MinerRegistry::new(config);
-        assert!(!registry.would_exceed_cap().await);
-        registry
-            .get_or_register(&"a".to_string(), dummy_addr(), None)
-            .await
-            .unwrap();
-        assert!(registry.would_exceed_cap().await);
     }
 }
