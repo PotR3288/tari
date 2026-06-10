@@ -36,6 +36,7 @@ use futures::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use log::{error, debug, info};
+use tari_common::configuration::Network;
 use tari_common_types::tari_address::TariAddress;
 use tari_comms::{multiaddr::Multiaddr, utils::multiaddr::multiaddr_to_socketaddr};
 use tari_core::{
@@ -70,6 +71,7 @@ const CLEANUP_INTERVAL_SECS: u64 = 10 * 60;
 /// * `state_machine` - state machine handle (available for future sync-check use)
 /// * `listener_address` - the address on which this proxy listens for XMRig connections
 /// * `wallet_payment_address` - where mining rewards are sent
+/// * `network` - the node's network, used to validate miner-provided payment addresses
 /// * `coinbase_extra` - optional extra data in the coinbase
 /// * `range_proof_type` - range proof type for coinbase outputs
 /// * `shutdown` - shutdown signal from the base node
@@ -79,6 +81,7 @@ pub async fn run_xmrig_proxy(
     state_machine: StateMachineHandle,
     listener_address: Multiaddr,
     wallet_payment_address: TariAddress,
+    network: Network,
     coinbase_extra: Vec<u8>,
     range_proof_type: RangeProofType,
     shutdown: ShutdownSignal,
@@ -132,6 +135,7 @@ pub async fn run_xmrig_proxy(
         miner_registry,
         nonce_partitioner,
         wallet_payment_address,
+        network,
         coinbase_extra,
         range_proof_type,
         // Placeholder — overwritten per-connection with the real remote address
