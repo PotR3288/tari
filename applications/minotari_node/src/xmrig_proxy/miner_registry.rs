@@ -54,7 +54,7 @@ pub struct MinerRegistryConfig {
     /// Minimum nonce range size per miner (used by NoncePartitioner, stored here for config centralization).
     // TODO: wire into NoncePartitioner::assign() as dynamic minimum instead of hard-coded MIN_NONCE_RANGE_SIZE
     #[allow(dead_code)]
-    pub min_nonce_range_size: u32,
+    pub min_nonce_range_size: u64,
 }
 
 /// Registry of connected miners — the authoritative source for miner identity and state.
