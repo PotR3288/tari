@@ -160,7 +160,7 @@ impl BlockTemplateStorage {
     ///
     /// Returns `true` if the template was found and the miner was added.
     pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u32>) -> bool {
-        info!(target: LOG_TARGET, "Storing template for miner ID {} with nonce range {:?}", miner_id.clone(), nonce_range.clone());
+        debug!(target: LOG_TARGET, "Cache hit for miner ID {}, added with nonce range {:?}", miner_id.clone(), nonce_range.clone());
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&key) {
             entry.assigned_miners.insert(miner_id.clone());
@@ -178,6 +178,7 @@ impl BlockTemplateStorage {
     }
 
     /// Retrieve a clone of the full template entry for the given mining hash.
+    // TODO: wire into handle_submit_block for identity verification (S2) — check assigned_miners
     #[allow(dead_code)]
     pub async fn get_entry(&self, mining_hash: &[u8; 32]) -> Option<TemplateEntry> {
         let map = self.inner.read().await;

@@ -116,6 +116,7 @@ impl NoncePartitioner {
     }
 
     /// Verify a submitted nonce belongs to the miner's assigned range.
+    // TODO: wire into handle_submit_block for identity verification (S2)
     #[allow(dead_code)]
     pub fn is_nonce_in_range(&self, miner_id: &MinerId, nonce: u64) -> bool {
         let range = match self.allocations.get(miner_id) {
@@ -132,21 +133,17 @@ impl NoncePartitioner {
     }
 
     /// Get number of active allocations.
+    // TODO: expose via getinfo or metrics endpoint
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
         self.allocations.len()
     }
 
     /// Retrieve the nonce range for a given miner (if assigned).
+    // TODO: expose via monitoring/debugging endpoint
     #[allow(dead_code)]
     pub fn get_range(&self, miner_id: &str) -> Option<Range<u32>> {
         self.allocations.get(miner_id).cloned()
-    }
-
-    /// Check whether a miner has an assigned range.
-    #[allow(dead_code)]
-    pub fn has_miner(&self, miner_id: &MinerId) -> bool {
-        self.allocations.contains_key(miner_id)
     }
 }
 

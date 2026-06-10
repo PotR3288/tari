@@ -25,6 +25,7 @@ use std::{net::SocketAddr, str::FromStr, sync::atomic::{AtomicU64, Ordering}, sy
 use hyper::{Response, StatusCode, body::Bytes};
 use log::{debug, info, trace, warn};
 use serde_json::{Value, json};
+use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::TariAddress,
     types::{
@@ -65,6 +66,12 @@ const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
 /// This corresponds to the high 4 bytes of the u64 nonce field.
 pub const TARI_BLOB_RESERVED_OFFSET: u32 = 35;
 
+/// Offset where the mining hash starts in the blob (after 3 zero padding bytes).
+const TARI_HASH_OFFSET: usize = 3;
+
+/// Size of the nonce field in bytes.
+const TARI_NONCE_SIZE: usize = 8;
+
 /// The total size of the Tari mining blob in bytes.
 const TARI_MINING_BLOB_SIZE: usize = 76;
 /// The pow_algo byte value for RandomXT (= 2).
@@ -75,10 +82,13 @@ pub struct InnerService {
     pub node_service: LocalNodeCommsInterface,
     pub consensus_rules: BaseNodeConsensusManager,
     /// State machine handle, available for future sync-status checks.
+    // TODO: use for sync status check before serving templates
     #[allow(dead_code)]
     pub state_machine: StateMachineHandle,
     pub block_templates: BlockTemplateStorage,
     pub wallet_payment_address: TariAddress,
+    /// The node's network — used to validate miner-provided payment addresses.
+    pub network: Network,
     pub coinbase_extra: Vec<u8>,
     pub range_proof_type: RangeProofType,
     pub miner_registry: MinerRegistry,
@@ -262,17 +272,38 @@ impl InnerService {
         let registration_id = parse_registration_id(req, self.peer_addr);
 
         let requested_wallet_address = parse_wallet_address_from_request(req);
-        let payment_address = requested_wallet_address
-            .clone()
-            .unwrap_or_else(|| self.wallet_payment_address.clone());
+        let payment_address = match &requested_wallet_address {
+            Some(addr) if addr.network() == self.network => requested_wallet_address.clone().unwrap(),
+            Some(addr) => {
+                debug!(
+                    target: LOG_TARGET,
+                    "Miner-provided address network '{}' does not match node network '{}'; falling back to config default (fallback active)",
+                    addr.network(),
+                    self.network
+                );
+                self.wallet_payment_address.clone()
+            },
+            None => {
+                debug!(
+                    target: LOG_TARGET,
+                    "No wallet address provided by miner; using config default (fallback active)"
+                );
+                self.wallet_payment_address.clone()
+            },
+        };
 
-        // 3. Register or refresh miner with real peer address (uses registration_id for dedup).
+        // 3. Register or refresh miner (uses registration_id for dedup).
         self.miner_registry
-            .get_or_register(&registration_id, self.peer_addr.ip(), requested_wallet_address.clone())
+            .get_or_register(&registration_id, requested_wallet_address.clone())
             .await?;
 
         // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
-        let current_tip = self.get_chain_tip().await?;
+        let mut handler = self.node_service.clone();
+        let meta = handler.get_metadata().await?;
+        let current_tip = ChainTip {
+            height: meta.best_block_height(),
+            top_hash: *meta.best_block_hash(),
+        };
         let advanced = self.block_templates.update_chain_tip(current_tip).await;
         if advanced {
             debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), invalidating all cached templates", current_tip.height, current_tip.top_hash);
@@ -281,7 +312,7 @@ impl InnerService {
             self.nonce_partitioner.write().await.reset();
         }
 
-        // 4. Check template cache for existing template with same wallet address
+        let next_height = meta.best_block_height().saturating_add(1);
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
             let nonce_range =
                 self.nonce_partitioner
@@ -311,12 +342,6 @@ impl InnerService {
         }
 
         // 4. No cached template — generate a new one
-        let mut handler = self.node_service.clone();
-
-        // Get chain metadata to determine block height for weight/coinbase calculations
-        let meta = handler.get_metadata().await?;
-        let next_height = meta.best_block_height().saturating_add(1);
-
         let constants = self.consensus_rules.consensus_constants(next_height);
         let asking_weight = constants.max_block_transaction_weight();
 
@@ -611,34 +636,8 @@ impl InnerService {
 
         let blob = hex::decode(blob_hex).map_err(|e| XmrigProxyError::InvalidRequest(e.to_string()))?;
 
-        if blob.len() != TARI_MINING_BLOB_SIZE {
-            return json_response(
-                StatusCode::OK,
-                &json_rpc_error(
-                    req["id"].as_i64(),
-                    -32602,
-                    &format!(
-                        "submitted blob has wrong length: {} (expected {TARI_MINING_BLOB_SIZE})",
-                        blob.len()
-                    ),
-                ),
-            );
-        }
-
-        // Extract the 32-byte mining hash from bytes 3..35
-        let mining_hash: [u8; 32] = blob
-            .get(3..35)
-            .ok_or(XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?
-            .try_into()
-            .map_err(|_| XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?;
-
-        // Extract the 8-byte nonce from bytes 35..43 (big-endian u64)
-        let nonce_bytes: [u8; 8] = blob
-            .get(35..43)
-            .ok_or(XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?
-            .try_into()
-            .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
-        let nonce = u64::from_be_bytes(nonce_bytes);
+        // Parse mining hash and nonce using shared parser (avoids magic numbers in callers)
+        let (mining_hash, nonce) = parse_mining_blob(&blob)?;
 
         // Look up and remove the stored block template (prevents duplicate submissions)
         let mut block = match self.block_templates.take(&mining_hash).await {
@@ -706,6 +705,29 @@ pub fn build_tari_mining_blob(mining_hash: &[u8], nonce: u64, pow_algo: u8) -> V
     blob.push(pow_algo);
     blob.extend_from_slice(&[0u8; 32]);
     blob
+}
+
+/// Parse the mining hash and nonce from a Tari mining blob.
+///
+/// Layout: `[0x00 x3][mining_hash:32][nonce:8][pow_algo:1][reserved:32]`
+fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError> {
+    if blob.len() != TARI_MINING_BLOB_SIZE {
+        return Err(XmrigProxyError::InvalidRequest(format!(
+            "blob length {} does not match expected {TARI_MINING_BLOB_SIZE}",
+            blob.len()
+        )));
+    }
+
+    let mining_hash: [u8; 32] = blob[TARI_HASH_OFFSET..TARI_BLOB_RESERVED_OFFSET as usize]
+        .try_into()
+        .map_err(|_| XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?;
+
+    let nonce_bytes: [u8; TARI_NONCE_SIZE] = blob[TARI_BLOB_RESERVED_OFFSET as usize..TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE]
+        .try_into()
+        .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
+    let nonce = u64::from_be_bytes(nonce_bytes);
+
+    Ok((mining_hash, nonce))
 }
 
 fn json_rpc_success(id: Option<i64>, result: Value) -> Value {
@@ -921,6 +943,22 @@ mod tests {
         let blob = build_tari_mining_blob(&hash, nonce, 2);
         // TARI_BLOB_RESERVED_OFFSET is 35, bytes 35..39 are the high nonce bytes
         assert_eq!(&blob[35..39], &[0x00, 0x00, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn parse_mining_blob_roundtrip() {
+        let hash = [0xABu8; 32];
+        let nonce: u64 = 0xDEADBEEFCAFEBABE;
+        let blob = build_tari_mining_blob(&hash, nonce, POW_ALGO_RANDOMXT);
+        let (parsed_hash, parsed_nonce) = parse_mining_blob(&blob).unwrap();
+        assert_eq!(parsed_hash, hash);
+        assert_eq!(parsed_nonce, nonce);
+    }
+
+    #[test]
+    fn parse_mining_blob_rejects_wrong_length() {
+        let blob = vec![0u8; 75]; // too short
+        assert!(parse_mining_blob(&blob).is_err());
     }
 
     // --- json_rpc_success / json_rpc_error ---
