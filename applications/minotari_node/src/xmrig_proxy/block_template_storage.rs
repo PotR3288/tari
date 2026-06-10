@@ -67,7 +67,7 @@ pub struct TemplateEntry {
     pub inserted_at: Instant,
     pub wallet_address: TariAddress,
     pub assigned_miners: HashSet<MinerId>,
-    pub nonce_ranges: HashMap<MinerId, Range<u32>>,
+    pub nonce_ranges: HashMap<MinerId, Range<u64>>,
     /// Difficulty from the node's block template (used for miner responses).
     pub target_difficulty: u64,
 }
@@ -112,7 +112,7 @@ impl BlockTemplateStorage {
         block: Block,
         wallet_address: TariAddress,
         miner_id: MinerId,
-        nonce_range: Range<u32>,
+        nonce_range: Range<u64>,
         target_difficulty: u64,
     ) {
         info!(target: LOG_TARGET, "Storing template for address {} and miner ID {} with nonce range {:?}", miner_id.clone(), wallet_address.clone(), nonce_range.clone());
@@ -159,7 +159,7 @@ impl BlockTemplateStorage {
     /// Add a new miner to an existing template entry (template caching hit).
     ///
     /// Returns `true` if the template was found and the miner was added.
-    pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u32>) -> bool {
+    pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u64>) -> bool {
         debug!(target: LOG_TARGET, "Cache hit for miner ID {}, added with nonce range {:?}", miner_id.clone(), nonce_range.clone());
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&key) {
