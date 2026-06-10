@@ -24,20 +24,20 @@ use std::ops::Range;
 
 use super::MinerId;
 
-/// Full 32-bit nonce space (0x00000000..u32::MAX covers all u32 values)
-const NONCE_SPACE_START: u32 = 0x00000000;
-const NONCE_SPACE_END: u32 = u32::MAX;
+/// Full 64-bit nonce space (0x0000_0000_0000_0000..u64::MAX covers all u64 values)
+const NONCE_SPACE_START: u64 = 0x0000_0000_0000_0000;
+const NONCE_SPACE_END: u64 = u64::MAX;
 
 /// Minimum nonces per miner (65,536) — below this, reject new miners
-const MIN_NONCE_RANGE_SIZE: u32 = 0x10000;
+const MIN_NONCE_RANGE_SIZE: u64 = 0x10000;
 
 /// Hard cap on concurrent miners
 const MAX_MINERS_HARD_CAP: usize = 128;
 
-/// Tracks which portions of the 32-bit nonce space are allocated.
+/// Tracks which portions of the 64-bit nonce space are allocated.
 /// Each entry maps a MinerId to its assigned contiguous range.
 pub struct NoncePartitioner {
-    allocations: std::collections::HashMap<MinerId, Range<u32>>,
+    allocations: std::collections::HashMap<MinerId, Range<u64>>,
 }
 
 impl NoncePartitioner {
@@ -53,13 +53,13 @@ impl NoncePartitioner {
     /// Returns `None` if remaining space is below `MIN_NONCE_RANGE_SIZE`.
     ///
     /// **Solo miner optimization:** if this is the only miner, it receives the full
-    /// 32-bit nonce space (`0x00000000..u32::MAX`).
+    /// 64-bit nonce space (`0x0000_0000_0000_0000..u64::MAX`).
     ///
     /// **Multi-miner strategy:** divide the space evenly among all active miners,
     /// re-partitioning existing ranges so that no two miners overlap. Existing
     /// miners are sorted by ID before partitioning so each miner consistently gets
     /// the same range regardless of HashMap iteration randomness.
-    pub fn assign(&mut self, miner_id: &MinerId) -> Option<Range<u32>> {
+    pub fn assign(&mut self, miner_id: &MinerId) -> Option<Range<u64>> {
         // Solo miner gets the full range
         if self.allocations.is_empty() {
             let range = NONCE_SPACE_START..NONCE_SPACE_END;
@@ -72,9 +72,10 @@ impl NoncePartitioner {
             return None;
         }
 
-        let n = (self.allocations.len() + 1) as u32; // including the new miner
-        // Use u64 to compute total_space without overflow when NONCE_SPACE_END == u32::MAX
-        let range_size = ((NONCE_SPACE_END as u64 + 1) / n as u64) as u32;
+        let n = (self.allocations.len() + 1) as u64; // including the new miner
+        // Divide the full 64-bit space evenly. We use u64::MAX / n directly since
+        // computing (u64::MAX + 1) overflows — the off-by-one is negligible at this scale.
+        let range_size = u64::MAX / n;
 
         // If the per-miner slice is too small, reject
         if range_size < MIN_NONCE_RANGE_SIZE {
@@ -87,7 +88,7 @@ impl NoncePartitioner {
         sorted_ids.sort_unstable();
 
         for (i, id) in sorted_ids.iter().enumerate() {
-            let start = NONCE_SPACE_START.saturating_add((i as u32).saturating_mul(range_size));
+            let start = NONCE_SPACE_START.saturating_add((i as u64).saturating_mul(range_size));
             let end = start.saturating_add(range_size);
             if let Some(entry) = self.allocations.get_mut(id) {
                 *entry = start..end;
@@ -96,7 +97,7 @@ impl NoncePartitioner {
 
         // Assign new miner to the next slot
         let slot_index = sorted_ids.len();
-        let start = NONCE_SPACE_START.saturating_add((slot_index as u32).saturating_mul(range_size));
+        let start = NONCE_SPACE_START.saturating_add((slot_index as u64).saturating_mul(range_size));
         let end = start.saturating_add(range_size);
 
         if start >= NONCE_SPACE_END {
@@ -123,8 +124,7 @@ impl NoncePartitioner {
             Some(r) => r,
             None => return false,
         };
-        let nonce_u32 = nonce as u32;
-        range.contains(&nonce_u32)
+        range.contains(&nonce)
     }
 
     /// Reset all allocations (called on template invalidation / chain advance).
@@ -142,7 +142,7 @@ impl NoncePartitioner {
     /// Retrieve the nonce range for a given miner (if assigned).
     // TODO: expose via monitoring/debugging endpoint
     #[allow(dead_code)]
-    pub fn get_range(&self, miner_id: &str) -> Option<Range<u32>> {
+    pub fn get_range(&self, miner_id: &str) -> Option<Range<u64>> {
         self.allocations.get(miner_id).cloned()
     }
 }
@@ -155,7 +155,7 @@ mod tests {
     fn solo_miner_gets_full_range() {
         let mut p = NoncePartitioner::new();
         let range = p.assign(&"solo".to_string()).unwrap();
-        assert_eq!(range, 0x00000000..0xFFFFFFFF);
+        assert_eq!(range, 0x0000_0000_0000_0000..u64::MAX);
         assert_eq!(p.active_count(), 1);
     }
 
@@ -173,13 +173,14 @@ mod tests {
         let mut p = NoncePartitioner::new();
         let range = p.assign(&"alice".to_string()).unwrap();
         let mid = (range.start..range.end).nth(100).unwrap_or(range.start);
-        assert!(p.is_nonce_in_range(&"alice".to_string(), mid as u64));
+        assert!(p.is_nonce_in_range(&"alice".to_string(), mid));
     }
 
     #[test]
     fn nonce_out_of_range_rejected() {
         let mut p = NoncePartitioner::new();
         p.assign(&"bob".to_string()).unwrap();
+        // Bob's range starts at 0, so u64::MAX is out of range (it's the boundary)
         assert!(!p.is_nonce_in_range(&"bob".to_string(), u64::MAX));
     }
 
@@ -229,7 +230,7 @@ mod tests {
         }
 
         // Check stored ranges (not captured return values, which become stale after re-partitioning)
-        let ranges: Vec<Range<u32>> = (0..32)
+        let ranges: Vec<Range<u64>> = (0..32)
             .map(|i| p.get_range(&format!("m{i}")).expect("miner should have a range"))
             .collect();
 
