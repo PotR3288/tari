@@ -575,8 +575,7 @@ impl InnerService {
             .read()
             .await
             .get_range(miner_id)
-            .map(|r| r.start as u64..r.end as u64)
-            .unwrap_or_else(|| 0..(u32::MAX as u64));
+            .unwrap_or_else(|| 0..u64::MAX);
         let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
         let blob_hex = hex::encode(&blob);
         let seed_hex = hex::encode(vm_key);
