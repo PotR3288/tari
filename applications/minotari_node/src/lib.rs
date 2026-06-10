@@ -287,6 +287,7 @@ pub async fn run_base_node_with_cli(
                             state_machine,
                             proxy_listener,
                             wallet_addr,
+                            network,
                             proxy_extra,
                             proxy_range_proof,
                             signal,
