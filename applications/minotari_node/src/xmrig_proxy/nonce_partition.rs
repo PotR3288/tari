@@ -60,6 +60,13 @@ impl NoncePartitioner {
     /// miners are sorted by ID before partitioning so each miner consistently gets
     /// the same range regardless of HashMap iteration randomness.
     pub fn assign(&mut self, miner_id: &MinerId) -> Option<Range<u64>> {
+        // If this miner already has an allocation, return it without repartitioning.
+        // This ensures idempotency — repeated requests from the same identity get
+        // the same nonce range (cached template path).
+        if let Some(range) = self.allocations.get(miner_id).cloned() {
+            return Some(range);
+        }
+
         // Solo miner gets the full range
         if self.allocations.is_empty() {
             let range = NONCE_SPACE_START..NONCE_SPACE_END;
@@ -144,6 +151,15 @@ impl NoncePartitioner {
     #[allow(dead_code)]
     pub fn get_range(&self, miner_id: &str) -> Option<Range<u64>> {
         self.allocations.get(miner_id).cloned()
+    }
+
+    /// Return all current allocations sorted by miner ID for deterministic ordering.
+    // TODO: expose via monitoring/debugging endpoint
+    #[allow(dead_code)]
+    pub fn get_all_ranges(&self) -> Vec<(String, Range<u64>)> {
+        let mut entries: Vec<_> = self.allocations.iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.into_iter().map(|(id, range)| (id.clone(), range.clone())).collect()
     }
 }
 
