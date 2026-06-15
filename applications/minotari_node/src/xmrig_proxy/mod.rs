@@ -74,6 +74,8 @@ const CLEANUP_INTERVAL_SECS: u64 = 10 * 60;
 /// * `network` - the node's network, used to validate miner-provided payment addresses
 /// * `coinbase_extra` - optional extra data in the coinbase
 /// * `range_proof_type` - range proof type for coinbase outputs
+/// * `max_miners` - maximum concurrent miners allowed in the registry
+/// * `miner_timeout_secs` - seconds of inactivity before a miner is evicted
 /// * `shutdown` - shutdown signal from the base node
 pub async fn run_xmrig_proxy(
     node_service: LocalNodeCommsInterface,
@@ -84,6 +86,8 @@ pub async fn run_xmrig_proxy(
     network: Network,
     coinbase_extra: Vec<u8>,
     range_proof_type: RangeProofType,
+    max_miners: usize,
+    miner_timeout_secs: u64,
     shutdown: ShutdownSignal,
 ) -> Result<(), anyhow::Error> {
     let listen_addr = multiaddr_to_socketaddr(&listener_address)?;
@@ -92,8 +96,8 @@ pub async fn run_xmrig_proxy(
     // Create shared miner registry and nonce partitioner before spawning cleanup tasks
     let miner_registry = MinerRegistry::new(MinerRegistryConfig {
         default_payment_address: wallet_payment_address.clone(),
-        max_miners: 128,
-        miner_timeout_secs: 300,
+        max_miners,
+        miner_timeout_secs,
         allow_custom_payment: true,
         min_nonce_range_size: 65536,
     });

@@ -23,7 +23,12 @@
 use cucumber::gherkin::Step;
 use cucumber::{then, when};
 use serde_json::{Value, json};
-use tari_integration_tests::TariWorld;
+use tari_common_types::{
+    tari_address::TariAddress,
+    types::{CompressedPublicKey, PrivateKey},
+};
+use tari_crypto::keys::SecretKey;
+use tari_integration_tests::{miner::mine_blocks_without_wallet, TariWorld};
 
 // Helper to resolve the XMRig proxy port for a given base node
 fn get_xmrig_proxy_port(world: &TariWorld, base_node_name: &String) -> u16 {
@@ -243,18 +248,27 @@ async fn xmrig_proxy_store_blob(world: &mut TariWorld) {
 // ---------------------------------------------------------------------------
 
 #[when(expr = r"I wait for miner eviction on base node {word} xmrig proxy")]
-async fn xmrig_proxy_wait_miner_eviction(_world: &mut TariWorld, _base_node_name: String) {
-    // The default miner_timeout_secs is 300s. For integration tests we wait a short
-    // duration and rely on the proxy's in-memory state being cleared when the
-    // template is rotated. In practice the proxy evicts stale miners on each
-    // getblocktemplate call — so a fresh request after this step will see the
-    // miner as unregistered.
-    //
-    // To force eviction without waiting 5 minutes, we send a getblockcount to
-    // trigger any periodic cleanup, then sleep briefly to allow the next
-    // getblocktemplate to treat the previous miner as stale.
-    use std::time::Duration;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+async fn xmrig_proxy_wait_miner_eviction(world: &mut TariWorld, _base_node_name: String) {
+    // The proxy evicts stale miners and all cached templates on each getblocktemplate call
+    // (chain tip detection). Send a fresh request to trigger eviction of the previous miner.
+    let port = get_xmrig_proxy_port(world, &_base_node_name);
+
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "getblocktemplate",
+        "params": {"wallet_address": "asdfs"},
+        "id": 99
+    });
+
+    world.last_xmrig_proxy_response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -262,13 +276,51 @@ async fn xmrig_proxy_wait_miner_eviction(_world: &mut TariWorld, _base_node_name
 // ---------------------------------------------------------------------------
 
 #[when(expr = r"I wait for block template expiry on base node {word} xmrig proxy")]
-async fn xmrig_proxy_wait_template_expiry(_world: &mut TariWorld, _base_node_name: String) {
+async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name: String) {
     // Block templates are evicted from the in-memory store when a new template
     // is generated (chain tip advances or template rotation). We trigger a tip
-    // advance by mining a single block on the base node, then sleep briefly
-    // to allow the proxy to pick up the new template.
+    // advance by mining 3 blocks on the base node, then make a getblocktemplate
+    // call to force the proxy to detect the new chain tip and evict cached templates.
     use std::time::Duration;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut client = world
+        .get_node_client(&_base_node_name)
+        .await
+        .expect("Couldn't get the node client to mine with");
+    let script_key_id = &world.script_key_id().await;
+    mine_blocks_without_wallet(
+        &mut client,
+        3, // num_blocks
+        0, // weight (default)
+        &world.key_manager,
+        script_key_id,
+        &world.default_payment_address.clone(),
+        false,
+        &world.consensus_manager.clone(),
+    )
+    .await;
+
+    // Make a getblocktemplate call to trigger chain tip detection + eviction.
+    let port = get_xmrig_proxy_port(world, &_base_node_name);
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "getblocktemplate",
+        "params": {"wallet_address": "asdfs"},
+        "id": 99
+    });
+
+    world.last_xmrig_proxy_response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    // Give the proxy time to process the eviction before submitblock runs.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,10 +374,16 @@ async fn xmrig_proxy_get_template_with_miner_id(
     // Use a fresh client per call to ensure distinct peer_addr (TCP connection).
     // This guarantees each miner gets a unique identity even if wallet_address
     // doesn't parse as a valid TariAddress.
+    // Send extra_nonce so the proxy resolves miner ID from it (Layer 1) instead of
+    // falling back to peer socket address (Layer 2), which would pollute the
+    // partitioner with stale IP:port entries.
     let req_body = json!({
         "jsonrpc": "2.0",
         "method": "getblocktemplate",
-        "params": {"wallet_address": wallet_address},
+        "params": {
+            "wallet_address": wallet_address,
+            "extra_nonce": wallet_address
+        },
         "id": 99
     });
 
@@ -342,11 +400,15 @@ async fn xmrig_proxy_get_template_with_miner_id(
     world.last_xmrig_proxy_response = resp;
 }
 
-/// Extract and store the nonce_range from the last getblocktemplate response.
+/// Extract and store ALL nonce ranges from the last getblocktemplate response.
+/// The proxy now returns `miner_nonce_ranges` in the response which contains
+/// every miner's current range — this keeps the test state consistent with what
+/// the partitioner actually has after repartitioning.
 #[when(expr = r"I store the nonce range for miner {string}")]
 async fn xmrig_proxy_store_nonce_range(world: &mut TariWorld, miner_id: String) {
     let resp = &world.last_xmrig_proxy_response;
 
+    // First extract the requesting miner's own range (for backwards compatibility)
     let nonce_range = resp
         .get("result")
         .and_then(|r| r.get("nonce_range"))
@@ -361,7 +423,36 @@ async fn xmrig_proxy_store_nonce_range(world: &mut TariWorld, miner_id: String) 
         .and_then(Value::as_u64)
         .expect("'nonce_range.end' must be a number");
 
-    world.miner_nonce_ranges.insert(miner_id, (start, end));
+    world.miner_nonce_ranges.insert(miner_id.clone(), (start, end));
+
+    // Also extract all OTHER miners' ranges from the response to keep test state consistent.
+    // Skip the requesting miner since we already extracted it above.
+    if let Some(all_ranges) = resp.get("result").and_then(|r| r.get("miner_nonce_ranges")) {
+        if let Some(arr) = all_ranges.as_array() {
+            for entry in arr {
+                if let (Some(mid), Some(nr)) = (
+                    entry.get("miner_id").and_then(Value::as_str),
+                    entry.get("nonce_range"),
+                ) {
+                    // Skip the requesting miner — already extracted above
+                    if mid == &miner_id {
+                        continue;
+                    }
+                    // Skip peer socket address miner IDs (contain ':') — these are not test miners.
+                    // The proxy uses IP:port as a fallback miner ID when no extra_nonce is provided,
+                    // and those entries may persist in the partitioner until eviction.
+                    if mid.contains(':') {
+                        continue;
+                    }
+                    let s = nr.get("start").and_then(Value::as_u64);
+                    let e = nr.get("end").and_then(Value::as_u64);
+                    if let (Some(s), Some(e)) = (s, e) {
+                        world.miner_nonce_ranges.insert(mid.to_string(), (s, e));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Assert that all stored nonce ranges are non-overlapping.
@@ -389,8 +480,8 @@ fn xmrig_proxy_assert_non_overlapping(world: &mut TariWorld) {
     }
 }
 
-/// Assert that a specific miner's range covers the full 32-bit nonce space.
-#[then(expr = r"miner {word} has full nonce range")]
+/// Assert that a specific miner's range covers the full 64-bit nonce space.
+#[then(expr = r"miner {string} has full nonce range")]
 fn xmrig_proxy_assert_full_range(world: &mut TariWorld, miner_id: String) {
     let (start, end) = world
         .miner_nonce_ranges
@@ -404,9 +495,9 @@ fn xmrig_proxy_assert_full_range(world: &mut TariWorld, miner_id: String) {
         miner_id, start
     );
     assert_eq!(
-        end, u32::MAX as u64,
+        end, u64::MAX,
         "Miner '{}' range end is {}, expected {}",
-        miner_id, end, u32::MAX
+        miner_id, end, u64::MAX
     );
 }
 
@@ -421,7 +512,7 @@ fn xmrig_proxy_assert_equal_split(world: &mut TariWorld, count: usize) {
         world.miner_nonce_ranges.len()
     );
 
-    let total_space = (u32::MAX as u64) + 1; // full 32-bit space including u32::MAX
+    let total_space = u64::MAX; // full 64-bit space
     let expected_size = total_space / count as u64;
 
     for (miner_id, &(start, end)) in world.miner_nonce_ranges.iter() {
@@ -435,7 +526,7 @@ fn xmrig_proxy_assert_equal_split(world: &mut TariWorld, count: usize) {
 }
 
 /// Assert that a submitted nonce falls within the miner's assigned range.
-#[then(expr = r"nonce {int} is in miner {word}'s range")]
+#[then(expr = r"nonce {int} is in miner {string}'s range")]
 fn xmrig_proxy_assert_nonce_in_range(world: &mut TariWorld, nonce: u64, miner_id: String) {
     let (start, end) = world
         .miner_nonce_ranges
@@ -451,7 +542,7 @@ fn xmrig_proxy_assert_nonce_in_range(world: &mut TariWorld, nonce: u64, miner_id
 }
 
 /// Assert that a submitted nonce falls outside the miner's assigned range.
-#[then(expr = r"nonce {int} is out of miner {word}'s range")]
+#[then(expr = r"nonce {int} is out of miner {string}'s range")]
 fn xmrig_proxy_assert_nonce_out_of_range(world: &mut TariWorld, nonce: u64, miner_id: String) {
     let (start, end) = world
         .miner_nonce_ranges
@@ -465,3 +556,333 @@ fn xmrig_proxy_assert_nonce_out_of_range(world: &mut TariWorld, nonce: u64, mine
         nonce, start, end, miner_id
     );
 }
+
+// ===========================================================================
+// Phase 1 P0: Miner Registration steps (A1–A4)
+// ===========================================================================
+
+/// Assert that the JSON-RPC response status is "OK".
+#[then(expr = r"the JSON-RPC response status is OK")]
+fn xmrig_proxy_assert_status_ok(world: &mut TariWorld) {
+    let resp = &world.last_xmrig_proxy_response;
+    let status = resp
+        .get("result")
+        .and_then(|r| r.get("status"))
+        .and_then(Value::as_str)
+        .expect("Response has no 'result.status' field");
+
+    assert_eq!(
+        status, "OK",
+        "Expected status OK, got '{}'. Full response: {resp}",
+        status
+    );
+}
+
+/// Assert that the response contains a specific dotted-path field.
+/// E.g., "nonce_range.start" checks resp.result.nonce_range.start exists.
+#[then(expr = r#"the response contains field "{string}""#)]
+fn xmrig_proxy_assert_response_contains_field(world: &mut TariWorld, path: String) {
+    let parts: Vec<&str> = path.split('.').collect();
+
+    // Walk the JSON tree starting from result
+    let mut current = world.last_xmrig_proxy_response.get("result");
+    for part in &parts {
+        match current {
+            Some(obj) => current = obj.get(*part),
+            None => break,
+        }
+    }
+
+    assert!(
+        current.is_some(),
+        "Response does not contain field '{}'. Full response: {}",
+        path,
+        world.last_xmrig_proxy_response
+    );
+}
+
+// ===========================================================================
+// Phase 1 P0: Payment Address steps (C1–C3) — variant with explicit wallet addr
+// ===========================================================================
+
+/// Send a getblocktemplate request with a specific miner ID and an explicit
+/// wallet address. Each call creates its own reqwest::Client to ensure a
+/// distinct TCP connection (unique peer_addr).
+#[when(expr = r"I request a block template from {word} with miner ID {string} using wallet address {string}")]
+async fn xmrig_proxy_get_template_with_miner_id_and_wallet(
+    world: &mut TariWorld,
+    _base_node_name: String,
+    _miner_id: String,
+    wallet_address: String,
+) {
+    let port = get_xmrig_proxy_port(world, &_base_node_name);
+
+    // Use a fresh client per call to ensure distinct peer_addr (TCP connection).
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "getblocktemplate",
+        "params": {"wallet_address": wallet_address},
+        "id": 99
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    world.last_xmrig_proxy_response = resp;
+}
+
+// ===========================================================================
+// Phase 1 P0: Template Caching steps (B1–B3) — storage & assertion helpers
+// ===========================================================================
+
+/// Store the `height` field from the last response under a named key.
+#[when(expr = r#"I store the response height as {string}"#)]
+async fn xmrig_proxy_store_response_height(world: &mut TariWorld, name: String) {
+    let height = world
+        .last_xmrig_proxy_response
+        .get("result")
+        .and_then(|r| r.get("height"))
+        .and_then(Value::as_u64)
+        .expect("'result.height' must be a number");
+
+    world.stored_values.insert(name, height.to_string());
+}
+
+/// Assert that the current response height matches a previously stored value.
+#[then(expr = r#"the response height matches stored value {string}"#)]
+fn xmrig_proxy_assert_height_matches(world: &mut TariWorld, name: String) {
+    let expected = world
+        .stored_values
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| panic!("No stored value for key '{}'", name));
+
+    let actual = world
+        .last_xmrig_proxy_response
+        .get("result")
+        .and_then(|r| r.get("height"))
+        .and_then(Value::as_u64)
+        .expect("'result.height' must be a number");
+
+    assert_eq!(
+        actual.to_string(),
+        expected,
+        "Expected height {}, got {}. Full response: {}",
+        expected,
+        actual,
+        world.last_xmrig_proxy_response
+    );
+}
+
+/// Store the `prev_hash` field from the last response under a named key.
+#[when(expr = r#"I store the response prev_hash as {string}"#)]
+async fn xmrig_proxy_store_response_prev_hash(world: &mut TariWorld, name: String) {
+    let prev_hash = world
+        .last_xmrig_proxy_response
+        .get("result")
+        .and_then(|r| r.get("prev_hash"))
+        .and_then(Value::as_str)
+        .expect("'result.prev_hash' must be a string");
+
+    world.stored_values.insert(name, prev_hash.to_string());
+}
+
+/// Assert that the current response's prev_hash differs from a stored value.
+#[then(expr = r#"the stored value {string} is different from current prev_hash"#)]
+fn xmrig_proxy_assert_prev_hash_changed(world: &mut TariWorld, name: String) {
+    let expected = world
+        .stored_values
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| panic!("No stored value for key '{}'", name));
+
+    let actual = world
+        .last_xmrig_proxy_response
+        .get("result")
+        .and_then(|r| r.get("prev_hash"))
+        .and_then(Value::as_str)
+        .expect("'result.prev_hash' must be a string");
+
+    assert_ne!(
+        actual,
+        &expected,
+        "Expected prev_hash to differ from '{}', but got '{}'. Full response: {}",
+        expected,
+        actual,
+        world.last_xmrig_proxy_response
+    );
+}
+
+/// Assert that the current response height is greater than a stored value.
+#[then(expr = r#"the response height is greater than stored value {string}"#)]
+fn xmrig_proxy_assert_height_greater(world: &mut TariWorld, name: String) {
+    let expected = world
+        .stored_values
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| panic!("No stored value for key '{}'", name));
+
+    let actual = world
+        .last_xmrig_proxy_response
+        .get("result")
+        .and_then(|r| r.get("height"))
+        .and_then(Value::as_u64)
+        .expect("'result.height' must be a number");
+
+    let expected_num: u64 = expected.parse().unwrap_or_else(|_| {
+        panic!("Stored value '{}' is not a valid number", name)
+    });
+
+    assert!(
+        actual > expected_num,
+        "Expected height {} to be greater than stored {}, but got {}. Full response: {}",
+        actual,
+        expected_num,
+        actual,
+        world.last_xmrig_proxy_response
+    );
+}
+
+// ===========================================================================
+// Phase 2 P1: Max miners cap step (A5) — generates valid LocalNet TariAddresses
+// ===========================================================================
+
+/// Send a getblocktemplate request with a randomly generated LocalNet TariAddress.
+/// Each call creates its own reqwest::Client to ensure distinct peer_addr, and
+/// generates a unique TariAddress so each connection gets a distinct registration_id.
+#[when(expr = r"I request a block template from {word} with a random wallet address")]
+async fn xmrig_proxy_get_template_with_random_wallet(
+    world: &mut TariWorld,
+    base_node_name: String,
+) {
+    let port = get_xmrig_proxy_port(world, &base_node_name);
+
+    // Generate a unique LocalNet TariAddress for this request.
+    // Each call produces a distinct address so registration_ids don't collide.
+    let pk = PrivateKey::random(&mut rand::rng());
+    let cpk = CompressedPublicKey::from_secret_key(&pk);
+    let addr: TariAddress = tari_common_types::tari_address::TariAddress::new_dual_address_with_default_features(
+        cpk.clone(),
+        cpk,
+        tari_common::configuration::Network::LocalNet,
+    )
+    .expect("should create valid LocalNet address");
+
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "getblocktemplate",
+        "params": {"wallet_address": addr.to_base58()},
+        "id": 99
+    });
+
+    // Fresh client per call → distinct peer_addr (TCP connection)
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    world.last_xmrig_proxy_response = resp;
+}
+
+// ===========================================================================
+// Phase 3: Multi-Miner Identity steps (E1, E2) — nonce range comparison
+// ===========================================================================
+
+/// Store only the requesting miner's own nonce range from `result.nonce_range`,
+/// without processing the full `miner_nonce_ranges` array. This avoids overwriting
+/// previously stored ranges when comparing idempotency across multiple requests.
+#[when(expr = r"I store my own nonce range as {string}")]
+async fn xmrig_proxy_store_own_nonce_range(world: &mut TariWorld, name: String) {
+    let resp = &world.last_xmrig_proxy_response;
+
+    let nonce_range = resp
+        .get("result")
+        .and_then(|r| r.get("nonce_range"))
+        .expect("Response has no 'result.nonce_range' field");
+
+    let start = nonce_range
+        .get("start")
+        .and_then(Value::as_u64)
+        .expect("'nonce_range.start' must be a number");
+    let end = nonce_range
+        .get("end")
+        .and_then(Value::as_u64)
+        .expect("'nonce_range.end' must be a number");
+
+    world.miner_nonce_ranges.insert(name, (start, end));
+}
+
+/// Assert that two named entries in miner_nonce_ranges have identical start/end values.
+#[then(expr = r"the stored nonce ranges are identical for {word} and {word}")]
+fn xmrig_proxy_assert_nonce_ranges_identical(world: &mut TariWorld, name_a: String, name_b: String) {
+    let (start_a, end_a) = world
+        .miner_nonce_ranges
+        .get(&name_a)
+        .copied()
+        .unwrap_or_else(|| panic!("No nonce range stored for key '{}'", name_a));
+
+    let (start_b, end_b) = world
+        .miner_nonce_ranges
+        .get(&name_b)
+        .copied()
+        .unwrap_or_else(|| panic!("No nonce range stored for key '{}'", name_b));
+
+    assert_eq!(
+        (start_a, end_a),
+        (start_b, end_b),
+        "Nonce ranges differ: '{}' is {}..{} but '{}' is {}..{}",
+        name_a, start_a, end_a, name_b, start_b, end_b
+    );
+}
+
+/// Send a getblocktemplate request with a specific miner ID, wallet address, and
+/// extra_nonce. Each call creates its own reqwest::Client to ensure distinct peer_addr.
+/// This is used for E1 where two connections share the same wallet_address but have
+/// different extra_nonces — verifying they resolve to distinct miners.
+#[when(expr = r"I request a block template from {word} with miner ID {string} using wallet address {string} and extra_nonce {string}")]
+async fn xmrig_proxy_get_template_with_miner_id_wallet_and_extra_nonce(
+    world: &mut TariWorld,
+    _base_node_name: String,
+    _miner_id: String,
+    wallet_address: String,
+    extra_nonce: String,
+) {
+    let port = get_xmrig_proxy_port(world, &_base_node_name);
+
+    // Fresh client per call → distinct peer_addr (TCP connection).
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "getblocktemplate",
+        "params": {
+            "wallet_address": wallet_address,
+            "extra_nonce": extra_nonce
+        },
+        "id": 99
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    world.last_xmrig_proxy_response = resp;
+}
+
+

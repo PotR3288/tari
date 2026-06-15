@@ -172,6 +172,7 @@ fn main() {
         // non-zero on any failure.
         world
             .fail_on_skipped()
+            // .fail_fast()  // temporarily disabled to see all results
             .with_writer(
                 writer::Summarize::new(writer::Basic::new(
                     io::stdout(),
