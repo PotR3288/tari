@@ -115,6 +115,9 @@ pub struct TariWorld {
     /// Named benchmark timers, keyed by a label set in the feature file.
     /// Used by "I start benchmark timer {word}" / "I stop benchmark timer {word} and log elapsed time" steps.
     pub benchmark_timers: IndexMap<String, Instant>,
+    /// Stored values for cross-step assertions (e.g., heights, prev_hashes).
+    /// Keyed by the name given in feature files like `as "first_height"`.
+    pub stored_values: IndexMap<String, String>,
 }
 
 impl Debug for TariWorld {
@@ -193,6 +196,7 @@ impl TariWorld {
             consensus_manager: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
             assigned_ports: Default::default(),
             benchmark_timers: Default::default(),
+            stored_values: Default::default(),
         }
     }
 
@@ -340,7 +344,9 @@ impl TariWorld {
     pub async fn before(&mut self, feature: &Feature, scenario: &Scenario) {
         self.current_feature_name = Some(feature.name.clone());
         self.current_scenario_name = Some(scenario.name.clone());
-        self.current_base_dir = Some(get_base_dir().join(feature.name.clone()).join(scenario.name.clone()))
+        self.current_base_dir = Some(get_base_dir().join(feature.name.clone()).join(scenario.name.clone()));
+        // Clear per-scenario state to prevent accumulation across scenarios.
+        self.miner_nonce_ranges.clear();
     }
 
     pub async fn after(&mut self, _scenario: &Scenario) {
