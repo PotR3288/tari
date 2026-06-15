@@ -272,6 +272,8 @@ pub async fn run_base_node_with_cli(
             let proxy_listener = config.base_node.xmrig_proxy_address.clone();
             let proxy_extra = config.base_node.xmrig_proxy_coinbase_extra.as_bytes().to_vec();
             let proxy_range_proof = config.base_node.xmrig_proxy_range_proof_type;
+            let proxy_max_miners = config.base_node.xmrig_proxy_max_miners;
+            let proxy_miner_timeout_secs = config.base_node.xmrig_proxy_miner_timeout_secs;
             let signal = shutdown.to_signal();
             let network = config.base_node.network;
             let node_service = ctx.local_node();
@@ -290,6 +292,8 @@ pub async fn run_base_node_with_cli(
                             network,
                             proxy_extra,
                             proxy_range_proof,
+                            proxy_max_miners,
+                            proxy_miner_timeout_secs,
                             signal,
                         )
                         .await

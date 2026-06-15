@@ -180,6 +180,20 @@ pub struct BaseNodeConfig {
     pub xmrig_proxy_coinbase_extra: String,
     /// Range proof type used for coinbase outputs produced by the XMRig proxy.
     pub xmrig_proxy_range_proof_type: RangeProofType,
+    /// Maximum concurrent miners allowed in the registry (default: 128).
+    #[serde(default = "default_xmrig_proxy_max_miners")]
+    pub xmrig_proxy_max_miners: usize,
+    /// Seconds of inactivity before a miner is considered stale and evicted (default: 300).
+    #[serde(default = "default_xmrig_proxy_miner_timeout_secs")]
+    pub xmrig_proxy_miner_timeout_secs: u64,
+}
+
+fn default_xmrig_proxy_max_miners() -> usize {
+    128
+}
+
+fn default_xmrig_proxy_miner_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -258,6 +272,8 @@ impl Default for BaseNodeConfig {
             xmrig_proxy_wallet_payment_address: String::new(),
             xmrig_proxy_coinbase_extra: "tari_base_node_xmrig".to_string(),
             xmrig_proxy_range_proof_type: RangeProofType::RevealedValue,
+            xmrig_proxy_max_miners: 128,
+            xmrig_proxy_miner_timeout_secs: 300,
         }
     }
 }
