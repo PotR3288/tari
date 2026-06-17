@@ -18,3 +18,18 @@ Feature: XMRig Proxy JSON-RPC Error Handling
         When I submit a block with the stored blob through base node NODE xmrig proxy
         Then the JSON-RPC response error code is -1
         And the JSON-RPC response error message contains "not found"
+
+    @slow
+    Scenario: 5_SubmitBlock_InvalidHexBlob
+        # Submitblock requires params[0] to be a valid hex string. Non-hex
+        # characters trigger InvalidRequest which the service layer maps to -32603.
+        When I send a raw JSON-RPC request to base node NODE xmrig proxy:
+          """
+          {
+            "jsonrpc": "2.0",
+            "method": "submitblock",
+            "params": ["not-valid-hex!!!"],
+            "id": 1
+          }
+          """
+        Then the JSON-RPC response error code is -32603

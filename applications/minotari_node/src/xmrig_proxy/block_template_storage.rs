@@ -33,6 +33,7 @@ use tari_common_types::{
     types::BlockHash,
 };
 use tari_node_components::blocks::Block;
+use tari_transaction_components::tari_proof_of_work::PowAlgorithm;
 use tari_utilities::ByteArray;
 use tokio::sync::RwLock;
 
@@ -70,6 +71,8 @@ pub struct TemplateEntry {
     pub nonce_ranges: HashMap<MinerId, Range<u64>>,
     /// Difficulty from the node's block template (used for miner responses).
     pub target_difficulty: u64,
+    /// PoW algorithm used to generate this template.
+    pub pow_algo: PowAlgorithm,
 }
 
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
@@ -114,6 +117,7 @@ impl BlockTemplateStorage {
         miner_id: MinerId,
         nonce_range: Range<u64>,
         target_difficulty: u64,
+        pow_algo: PowAlgorithm,
     ) {
         info!(target: LOG_TARGET, "Storing template for address {} and miner ID {} with nonce range {:?}", miner_id.clone(), wallet_address.clone(), nonce_range.clone());
         let mut map = self.inner.write().await;
@@ -134,6 +138,7 @@ impl BlockTemplateStorage {
                     hm
                 },
                 target_difficulty,
+                pow_algo,
             },
         );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
@@ -197,13 +202,17 @@ impl BlockTemplateStorage {
         map.remove(key).map(|e| e.block)
     }
 
-    /// Evict all cached templates. Called when Tari's chain tip advances so that stale
-    /// templates are not served to miners on the next request.
-    pub async fn evict_all(&self) {
+    /// Evict cached templates for a specific PoW algorithm. Called when Tari's chain tip advances
+    /// so that stale templates are not served to miners on the next request. Only evicts templates
+    /// whose `pow_algo` matches the given algorithm — templates from other algorithms remain valid.
+    pub async fn evict_for_algorithm(&self, algo: PowAlgorithm) {
         let mut map = self.inner.write().await;
-        let count = map.len();
-        map.clear();
-        debug!(target: LOG_TARGET, "Evicted all {} cached templates (chain tip advanced)", count);
+        let before = map.len();
+        map.retain(|_, e| e.pow_algo != algo);
+        let removed = before.saturating_sub(map.len());
+        if removed > 0 {
+            debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced)", removed, algo);
+        }
     }
 
     /// Remove all templates older than [`MAX_TEMPLATE_AGE`].
@@ -254,7 +263,7 @@ mod tests {
         let address = TariAddress::default();
         let miner = "miner_1".to_string();
 
-        storage.store(key, block.clone(), address, miner, 0..1000, 1).await;
+        storage.store(key, block.clone(), address, miner, 0..1000, 1, PowAlgorithm::RandomXT).await;
 
         let retrieved = storage.get(&key).await.unwrap();
         assert_eq!(retrieved, block);
@@ -275,7 +284,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, block.clone(), address, "m".to_string(), 0..1000, 1)
+            .store(key, block.clone(), address, "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
             .await;
 
         let taken = storage.take(&key).await.unwrap();
@@ -296,7 +305,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
             .await;
 
         let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
@@ -311,7 +320,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
             .await;
         // Age the template beyond MAX_TEMPLATE_AGE
         set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
@@ -326,7 +335,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000, 1)
+            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
             .await;
 
         let added = storage
@@ -349,10 +358,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1)
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1)
+            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
             .await;
 
         // Age only key1
@@ -371,10 +380,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100, 1)
+            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key, make_test_block(), address, "m2".to_string(), 0..100, 1)
+            .store(key, make_test_block(), address, "m2".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
             .await;
 
         let entry = storage.get_entry(&key).await.unwrap();
@@ -412,40 +421,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evict_all_clears_everything() {
+    async fn evict_for_algorithm_clears_matching() {
         let storage = BlockTemplateStorage::new();
         let key1 = [1u8; 32];
         let key2 = [2u8; 32];
         let address = TariAddress::default();
 
+        // Store a RandomXT template and a Sha3x template
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1)
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1)
+            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::Sha3x)
             .await;
 
         assert!(storage.get(&key1).await.is_some());
         assert!(storage.get(&key2).await.is_some());
 
-        storage.evict_all().await;
+        // Evict only RandomXT templates
+        storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
 
-        assert!(storage.get(&key1).await.is_none());
-        assert!(storage.get(&key2).await.is_none());
+        assert!(storage.get(&key1).await.is_none());  // RandomXT removed
+        assert!(storage.get(&key2).await.is_some());   // Sha3x preserved
     }
 
     #[tokio::test]
-    async fn evict_all_does_not_affect_chain_tip() {
+    async fn evict_for_algorithm_does_not_affect_chain_tip() {
         let storage = BlockTemplateStorage::new();
         let tip = ChainTip { height: 42, top_hash: [99u8; 32].into() };
         storage.update_chain_tip(tip).await;
 
-        storage.evict_all().await;
+        storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
 
-        // Verify the chain tip survived evict_all by checking that a subsequent
-        // update is still detected as an advance. If evict_all had cleared the
-        // stored tip, this call would return false (reset from default) instead of true.
+        // Verify the chain tip survived evict_for_algorithm by checking that a subsequent
+        // update is still detected as an advance. If eviction had cleared the stored tip,
+        // this call would return false (reset from default) instead of true.
         let new_tip = ChainTip { height: 43, top_hash: [99u8; 32].into() };
         assert!(storage.update_chain_tip(new_tip).await);
+    }
+
+    #[tokio::test]
+    async fn evict_for_algorithm_preserves_other_algorithms() {
+        let storage = BlockTemplateStorage::new();
+        let key_rx = [1u8; 32];
+        let key_cuckaroo = [2u8; 32];
+        let address = TariAddress::default();
+
+        // Store templates for different algorithms
+        storage
+            .store(key_rx, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .await;
+        storage
+            .store(key_cuckaroo, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::Cuckaroo)
+            .await;
+
+        // Evict RandomXT — Cuckaroo should survive
+        storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+
+        assert!(storage.get(&key_rx).await.is_none());
+        assert!(storage.get(&key_cuckaroo).await.is_some());
     }
 }
