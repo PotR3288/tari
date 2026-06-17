@@ -1,4 +1,4 @@
-# Copyright 2026. The Tari Project
+# Copyright 2022 The Tari Project
 # SPDX-License-Identifier: BSD-3-Clause
 
 @xmrig-proxy @base-node @slow

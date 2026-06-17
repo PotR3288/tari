@@ -22,6 +22,7 @@
 
 use cucumber::gherkin::Step;
 use cucumber::{then, when};
+use hex;
 use serde_json::{Value, json};
 use tari_common_types::{
     tari_address::TariAddress,
@@ -175,14 +176,16 @@ async fn xmrig_proxy_raw_request(
 #[when(expr = r"I request a block template from {word}")]
 async fn xmrig_proxy_get_getblocktemplate(world: &mut TariWorld, base_node_name: String) {
     let port = get_xmrig_proxy_port(world, &base_node_name);
-    
+
+    // Use the world's default payment address (a valid LocalNet TariAddress) so the proxy
+    // resolves miner identity from it rather than falling back to peer socket address.
     let req_body = json!({
         "jsonrpc": "2.0",
         "method": "getblocktemplate",
-        "params": {"wallet_address": "asdfs"},
+        "params": {"wallet_address": world.default_payment_address.to_base58()},
         "id": 99
     });
-    
+
     let proxy_client = reqwest::Client::new();
     world.last_xmrig_proxy_response = proxy_client.post(format!("http://127.0.0.1:{port}/"))
         .json(&req_body)
@@ -195,7 +198,61 @@ async fn xmrig_proxy_get_getblocktemplate(world: &mut TariWorld, base_node_name:
 }
 
 // ---------------------------------------------------------------------------
-// Submit-block with stored blob
+// Submit-block with stored blob patched by a specific nonce value
+// ---------------------------------------------------------------------------
+
+/// Patch the stored block template blob with a given nonce and submit it.
+/// The Tari mining blob is 76 bytes: [3 zero][mining_hash:32][nonce:8 big-endian][pow_algo:1][reserved:32].
+/// Nonce occupies bytes 35..43 (big-endian). This enables testing the happy-path
+/// submitblock flow — get a template, patch in a nonce, submit immediately before eviction.
+#[when(expr = r"I submit the stored blob with nonce {int} through base node {word} xmrig proxy")]
+async fn xmrig_proxy_submit_stored_blob_with_nonce(world: &mut TariWorld, nonce: u64, base_node_name: String) {
+    const TARI_BLOB_RESERVED_OFFSET: usize = 35;
+    const TARI_NONCE_SIZE: usize = 8;
+
+    let port = get_xmrig_proxy_port(world, &base_node_name);
+    let url = format!("http://127.0.0.1:{port}/");
+
+    // Retrieve the original blob hex from storage
+    let blob_value = world.stored_block_template_blob.clone().expect(
+        "No block template blob stored — did you run 'I store the block template blob from the last response'?",
+    );
+    let blob_hex = blob_value.as_str().expect("stored_block_template_blob is not a string");
+
+    // Decode, patch nonce at offset 35 (big-endian), re-encode
+    let mut blob = hex::decode(blob_hex).expect("Failed to decode stored block template blob hex");
+    assert!(blob.len() >= TARI_BLOB_RESERVED_OFFSET + TARI_NONCE_SIZE,
+        "Blob too short ({}) to contain nonce at offset {}", blob.len(), TARI_BLOB_RESERVED_OFFSET);
+
+    let nonce_bytes = nonce.to_be_bytes();
+    for (i, b) in nonce_bytes.iter().enumerate() {
+        blob[TARI_BLOB_RESERVED_OFFSET + i] = *b;
+    }
+
+    let patched_blob_hex = hex::encode(&blob);
+
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "method": "submitblock",
+        "params": [patched_blob_hex],
+        "id": 99
+    });
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    world.last_xmrig_proxy_response = resp;
+}
+
+// ---------------------------------------------------------------------------
+// Submit-block with stored blob (original — resubmits unmodified blob)
 // ---------------------------------------------------------------------------
 
 #[when(expr = r"I submit a block with the stored blob through base node {word} xmrig proxy")]
@@ -253,10 +310,12 @@ async fn xmrig_proxy_wait_miner_eviction(world: &mut TariWorld, _base_node_name:
     // (chain tip detection). Send a fresh request to trigger eviction of the previous miner.
     let port = get_xmrig_proxy_port(world, &_base_node_name);
 
+    // Use the world's default payment address so the proxy resolves miner identity from it
+    // rather than falling back to peer socket address.
     let req_body = json!({
         "jsonrpc": "2.0",
         "method": "getblocktemplate",
-        "params": {"wallet_address": "asdfs"},
+        "params": {"wallet_address": world.default_payment_address.to_base58()},
         "id": 99
     });
 
@@ -302,10 +361,13 @@ async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name
 
     // Make a getblocktemplate call to trigger chain tip detection + eviction.
     let port = get_xmrig_proxy_port(world, &_base_node_name);
+
+    // Use the world's default payment address so the proxy resolves miner identity from it
+    // rather than falling back to peer socket address.
     let req_body = json!({
         "jsonrpc": "2.0",
         "method": "getblocktemplate",
-        "params": {"wallet_address": "asdfs"},
+        "params": {"wallet_address": world.default_payment_address.to_base58()},
         "id": 99
     });
 
