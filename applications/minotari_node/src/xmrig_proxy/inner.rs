@@ -306,10 +306,30 @@ impl InnerService {
         };
         let advanced = self.block_templates.update_chain_tip(current_tip).await;
         if advanced {
-            debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), invalidating all cached templates", current_tip.height, current_tip.top_hash);
-            self.block_templates.evict_all().await;
-            // Clear stale nonce allocations so the next template request gets a fresh partition.
-            self.nonce_partitioner.write().await.reset();
+            // Only evict RandomXT templates when a RandomXT block advances the tip.
+            // Non-RandomXT blocks don't invalidate our cached template since we only
+            // mine RandomXT and its target interval (480s) is much longer than other lanes.
+            let new_block_algo = handler.get_metadata().await.ok().and_then(|m| {
+                m.best_block_height()
+                    .checked_sub(1)
+                    .map(|h| h)
+            });
+            let should_evict = if let Some(height) = new_block_algo {
+                match handler.get_header(height).await {
+                    Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if should_evict {
+                debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
+                self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+                // Clear stale nonce allocations so the next template request gets a fresh partition.
+                self.nonce_partitioner.write().await.reset();
+            } else {
+                debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}) by non-RandomXT block, keeping RandomXT templates", current_tip.height, current_tip.top_hash);
+            }
         }
 
         let next_height = meta.best_block_height().saturating_add(1);
@@ -511,6 +531,7 @@ impl InnerService {
                 miner_id.clone(),
                 nonce_range,
                 target_difficulty,
+                PowAlgorithm::RandomXT,
             )
             .await;
 
