@@ -38,22 +38,22 @@ const MIN_NONCE_RANGE_SIZE: u64 = 0x10000;
 /// Each entry maps a MinerId to its assigned contiguous range.
 pub struct NoncePartitioner {
     allocations: std::collections::HashMap<MinerId, Range<u64>>,
-    /// Maximum concurrent miners allowed (derived from MinerRegistryConfig).
-    max_miners: usize,
 }
 
 impl NoncePartitioner {
     /// Create a new, empty partitioner.
-    pub fn new(max_miners: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             allocations: std::collections::HashMap::new(),
-            max_miners,
         }
     }
 
     /// Assign a non-overlapping nonce range to a miner.
     ///
-    /// Returns `None` if remaining space is below `MIN_NONCE_RANGE_SIZE`.
+    /// Returns `None` if the per-miner slice would be below `MIN_NONCE_RANGE_SIZE`.
+    /// There is no independent max-miners cap here — that is enforced upstream by
+    /// `MinerRegistry::get_or_register()`, so callers only reach this function when
+    /// they are already authorised to mine.
     ///
     /// **Solo miner optimization:** if this is the only miner, it receives the full
     /// 64-bit nonce space (`0x0000_0000_0000_0000..u64::MAX`).
@@ -75,11 +75,6 @@ impl NoncePartitioner {
             let range = NONCE_SPACE_START..NONCE_SPACE_END;
             self.allocations.insert(miner_id.clone(), range.clone());
             return Some(range);
-        }
-
-        // Check hard cap — uses config-derived value instead of hardcoded constant.
-        if self.allocations.len() >= self.max_miners {
-            return None;
         }
 
         let n = (self.allocations.len() + 1) as u64; // including the new miner
@@ -197,7 +192,7 @@ mod tests {
 
     #[test]
     fn solo_miner_gets_full_range() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         let range = p.assign(&"solo".to_string()).unwrap();
         assert_eq!(range, 0x0000_0000_0000_0000..u64::MAX);
         assert_eq!(p.active_count(), 1);
@@ -205,7 +200,7 @@ mod tests {
 
     #[test]
     fn multi_miner_gets_split_range() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"m1".to_string()).unwrap();
         let r2 = p.assign(&"m2".to_string()).unwrap();
         assert_eq!(p.active_count(), 2);
@@ -214,7 +209,7 @@ mod tests {
 
     #[test]
     fn nonce_in_range_for_owner() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         let range = p.assign(&"alice".to_string()).unwrap();
         let mid = (range.start..range.end).nth(100).unwrap_or(range.start);
         assert!(p.is_nonce_in_range(&"alice".to_string(), mid));
@@ -222,7 +217,7 @@ mod tests {
 
     #[test]
     fn nonce_out_of_range_rejected() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"bob".to_string()).unwrap();
         // Bob's range starts at 0, so u64::MAX is out of range (it's the boundary)
         assert!(!p.is_nonce_in_range(&"bob".to_string(), u64::MAX));
@@ -230,14 +225,14 @@ mod tests {
 
     #[test]
     fn unknown_miner_fails_nonce_check() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"carol".to_string()).unwrap();
         assert!(!p.is_nonce_in_range(&"unknown".to_string(), 0));
     }
 
     #[test]
     fn reclaim_frees_miner() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"dave".to_string()).unwrap();
         assert_eq!(p.active_count(), 1);
         p.reclaim(&"dave".to_string());
@@ -246,7 +241,7 @@ mod tests {
 
     #[test]
     fn reset_clears_all() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"a".to_string()).unwrap();
         p.assign(&"b".to_string()).unwrap();
         p.assign(&"c".to_string()).unwrap();
@@ -256,19 +251,25 @@ mod tests {
     }
 
     #[test]
-    fn assign_returns_none_when_space_exhausted() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
-        for i in 0..TEST_MAX_MINERS {
+    fn no_independent_max_miners_cap() {
+        // The partitioner must not enforce its own max-miners cap — that is the
+        // registry's job.  This test verifies that assign() succeeds for more
+        // allocations than TEST_MAX_MINERS, proving there is no independent gate.
+        let mut p = NoncePartitioner::new();
+        // Allocate well beyond the old hardcoded cap; all should succeed because
+        // u64::MAX / n stays far above MIN_NONCE_RANGE_SIZE for any realistic n.
+        for i in 0..(TEST_MAX_MINERS * 2) {
             let id = format!("miner_{i}");
-            let result = p.assign(&id);
-            _ = result;
+            assert!(
+                p.assign(&id).is_some(),
+                "assign() returned None at allocation #{i} — partitioner has its own cap"
+            );
         }
-        assert!(p.assign(&"overflow".to_string()).is_none());
     }
 
     #[test]
     fn reclaim_all_removes_multiple_ranges() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         for i in 0..10 {
             p.assign(&format!("m{i}")).unwrap();
         }
@@ -292,7 +293,7 @@ mod tests {
 
     #[test]
     fn reclaim_all_ignores_unknown_miners() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"existing".to_string()).unwrap();
         assert_eq!(p.active_count(), 1);
 
@@ -307,7 +308,7 @@ mod tests {
     fn assign_after_targeted_reclaim() {
         // Simulate: 3 miners assigned, then targeted reclaim of middle one,
         // then a new miner should use the reclaimed slot without repartitioning others.
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         p.assign(&"a".to_string()).unwrap(); // solo gets full range
         p.assign(&"b".to_string()).unwrap(); // triggers repartition
         p.assign(&"c".to_string()).unwrap(); // triggers repartition
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn ranges_do_not_overlap() {
-        let mut p = NoncePartitioner::new(TEST_MAX_MINERS);
+        let mut p = NoncePartitioner::new();
         for i in 0..32 {
             p.assign(&format!("m{i}")).unwrap();
         }
