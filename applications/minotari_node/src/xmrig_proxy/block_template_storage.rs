@@ -205,14 +205,27 @@ impl BlockTemplateStorage {
     /// Evict cached templates for a specific PoW algorithm. Called when Tari's chain tip advances
     /// so that stale templates are not served to miners on the next request. Only evicts templates
     /// whose `pow_algo` matches the given algorithm — templates from other algorithms remain valid.
-    pub async fn evict_for_algorithm(&self, algo: PowAlgorithm) {
+    ///
+    /// Returns the set of all miner IDs associated with evicted entries, so callers can reclaim
+    /// their nonce ranges from the partitioner without a nuclear reset.
+    pub async fn evict_for_algorithm(&self, algo: PowAlgorithm) -> HashSet<MinerId> {
         let mut map = self.inner.write().await;
         let before = map.len();
+
+        // Collect assigned_miners BEFORE eviction so we can reclaim their nonce ranges.
+        let evicted_miners: HashSet<MinerId> = map
+            .iter()
+            .filter(|(_, e)| e.pow_algo == algo)
+            .flat_map(|(_, e)| e.assigned_miners.iter().cloned())
+            .collect();
+
+        // Then evict matching templates.
         map.retain(|_, e| e.pow_algo != algo);
         let removed = before.saturating_sub(map.len());
         if removed > 0 {
-            debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced)", removed, algo);
+            debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced), reclaiming {} miner IDs", removed, algo, evicted_miners.len());
         }
+        evicted_miners
     }
 
     /// Remove all templates older than [`MAX_TEMPLATE_AGE`].
@@ -458,6 +471,41 @@ mod tests {
         // this call would return false (reset from default) instead of true.
         let new_tip = ChainTip { height: 43, top_hash: [99u8; 32].into() };
         assert!(storage.update_chain_tip(new_tip).await);
+    }
+
+    #[tokio::test]
+    async fn evict_for_algorithm_returns_miner_ids() {
+        let storage = BlockTemplateStorage::new();
+        let key1 = [1u8; 32];
+        let address = TariAddress::default();
+
+        // Store a RandomXT template with two miners assigned.
+        storage
+            .store(key1, make_test_block(), address.clone(), "miner_a".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .await;
+        let key = storage.get_for_address(&address).await.unwrap().0;
+        storage.add_miner_to_template(key, "miner_b".to_string(), 100..200).await;
+
+        // Evict — should return both miner IDs.
+        let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains("miner_a"));
+        assert!(evicted.contains("miner_b"));
+    }
+
+    #[tokio::test]
+    async fn evict_for_algorithm_returns_empty_when_no_match() {
+        let storage = BlockTemplateStorage::new();
+        let key = [1u8; 32];
+        let address = TariAddress::default();
+
+        // Store a Sha3x template — RandomXT eviction should return empty.
+        storage
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::Sha3x)
+            .await;
+
+        let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+        assert!(evicted.is_empty());
     }
 
     #[tokio::test]
