@@ -101,7 +101,7 @@ pub async fn run_xmrig_proxy(
         allow_custom_payment: true,
         min_nonce_range_size: 65536,
     });
-    let nonce_partitioner = Arc::new(RwLock::new(NoncePartitioner::new()));
+    let nonce_partitioner = Arc::new(RwLock::new(NoncePartitioner::new(max_miners)));
 
     // Periodic cleanup of expired templates and stale miners
     let cleanup_storage = block_templates.clone();

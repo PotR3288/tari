@@ -324,9 +324,14 @@ impl InnerService {
             };
             if should_evict {
                 debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-                self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-                // Clear stale nonce allocations so the next template request gets a fresh partition.
-                self.nonce_partitioner.write().await.reset();
+                let evicted_miner_ids = self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+
+                // Reclaim nonce ranges for miners associated with evicted templates.
+                // Active miners whose templates survived (non-RandomXT tip advance) keep their ranges.
+                if !evicted_miner_ids.is_empty() {
+                    let reclaimed = self.nonce_partitioner.write().await.reclaim_all(&evicted_miner_ids);
+                    debug!(target: LOG_TARGET, "Reclaimed {} nonce ranges after template eviction", reclaimed);
+                }
             } else {
                 debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}) by non-RandomXT block, keeping RandomXT templates", current_tip.height, current_tip.top_hash);
             }
