@@ -339,14 +339,7 @@ impl InnerService {
 
         let next_height = meta.best_block_height().saturating_add(1);
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
-            let nonce_range =
-                self.nonce_partitioner
-                    .write()
-                    .await
-                    .assign(&miner_id)
-                    .ok_or(XmrigProxyError::MinerValidationError(
-                        "No nonce space available".to_string(),
-                    ))?;
+            let nonce_range = self.nonce_partitioner.write().await.assign(&miner_id);
 
             // Record the mapping so eviction can reclaim this nonce range later.
             self.miner_registry
@@ -509,14 +502,7 @@ impl InnerService {
             .hash();
 
         // Assign nonce range and store template with miner context
-        let nonce_range =
-            self.nonce_partitioner
-                .write()
-                .await
-                .assign(&miner_id)
-                .ok_or(XmrigProxyError::MinerValidationError(
-                    "No nonce space available".to_string(),
-                ))?;
+        let nonce_range = self.nonce_partitioner.write().await.assign(&miner_id);
 
         // Record the mapping so eviction can reclaim this nonce range later.
         self.miner_registry
