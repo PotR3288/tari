@@ -542,24 +542,37 @@ fn xmrig_proxy_assert_non_overlapping(world: &mut TariWorld) {
     }
 }
 
-/// Assert that a specific miner's range covers the full 64-bit nonce space.
-#[then(expr = r"miner {string} has full nonce range")]
-fn xmrig_proxy_assert_full_range(world: &mut TariWorld, miner_id: String) {
+/// Assert that a specific miner's range is valid (start < u64::MAX, end == u64::MAX).
+#[then(expr = r"miner {string} has a valid nonce range")]
+fn xmrig_proxy_assert_valid_range(world: &mut TariWorld, miner_id: String) {
     let (start, end) = world
         .miner_nonce_ranges
         .get(&miner_id)
         .copied()
         .unwrap_or_else(|| panic!("No nonce range stored for miner '{miner_id}'"));
 
-    assert_eq!(
-        start, 0,
-        "Miner '{}' range start is {}, expected 0",
-        miner_id, start
+    assert!(
+        start < u64::MAX,
+        "Miner '{}' range start is {}, expected < {}",
+        miner_id, start, u64::MAX
     );
     assert_eq!(
         end, u64::MAX,
         "Miner '{}' range end is {}, expected {}",
         miner_id, end, u64::MAX
+    );
+}
+
+/// Assert that all stored miners have distinct nonce starts.
+#[then(expr = r"the miners have distinct nonce starts")]
+fn xmrig_proxy_assert_distinct_starts(world: &mut TariWorld) {
+    let starts: Vec<u64> = world.miner_nonce_ranges.values().map(|&(start, _)| start).collect();
+    let unique_count = starts.iter().collect::<std::collections::HashSet<_>>().len();
+    assert!(
+        unique_count == starts.len(),
+        "Expected {} distinct nonce starts, found {} (duplicates detected)",
+        starts.len(),
+        unique_count
     );
 }
 

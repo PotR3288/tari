@@ -49,14 +49,6 @@ pub enum XmrigProxyError {
     #[allow(dead_code)]
     MinerAuthError(String),
 
-    #[error("Miner validation failed: {0}")]
-    MinerValidationError(String),
-
-    #[error("Nonce out of assigned range: miner={0}, submitted={1}, range={2:?}")]
-    // TODO: wire into handle_submit_block for nonce range verification (S2)
-    #[allow(dead_code)]
-    NonceOutOfRange(String, u64, std::ops::Range<u64>),
-
     #[error("Max miners reached: {0}")]
     MaxMinersReached(usize),
 }
@@ -65,8 +57,6 @@ impl XmrigProxyError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::MinerAuthError(_) => StatusCode::UNAUTHORIZED,
-            Self::MinerValidationError(_) => StatusCode::BAD_REQUEST,
-            Self::NonceOutOfRange(_, _, _) => StatusCode::BAD_REQUEST,
             Self::MaxMinersReached(_) => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -81,18 +71,6 @@ mod tests {
     fn miner_auth_error_returns_unauthorized() {
         let err = XmrigProxyError::MinerAuthError("test".into());
         assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn miner_validation_error_returns_bad_request() {
-        let err = XmrigProxyError::MinerValidationError("test".into());
-        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn nonce_out_of_range_returns_bad_request() {
-        let err = XmrigProxyError::NonceOutOfRange("m".into(), 0, 0..100);
-        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

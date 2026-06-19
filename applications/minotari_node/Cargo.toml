@@ -47,6 +47,7 @@ futures = { version = "^0.3.16", default-features = false, features = [
     "alloc",
 ] }
 qrcode = { version = "0.12" }
+rand = { workspace = true }
 log = { workspace = true, features = ["std"] }
 log4rs = { workspace = true, default-features = false, features = [
     "config_parsing",
