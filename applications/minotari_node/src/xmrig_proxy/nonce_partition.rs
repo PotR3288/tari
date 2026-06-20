@@ -104,22 +104,7 @@ impl NoncePartitioner {
         count
     }
 
-    /// Reset all allocations (called on template invalidation / chain advance).
-    #[allow(dead_code)]
-    pub(crate) fn reset(&mut self) {
-        let count = self.starts.len();
-        self.starts.clear();
-        debug!(target: LOG_TARGET, "Reset {} nonce allocations", count);
-    }
-
-    /// Get number of active allocations.
-    #[allow(dead_code)]
-    pub fn active_count(&self) -> usize {
-        self.starts.len()
-    }
-
     /// Retrieve the nonce range for a given miner (if assigned).
-    #[allow(dead_code)]
     pub fn get_range(&self, miner_id: &str) -> Option<Range<u64>> {
         self.starts.get(miner_id).map(|&start| start..u64::MAX)
     }
@@ -147,7 +132,6 @@ mod tests {
         // Range should be (start..u64::MAX) for some random start.
         assert!(range.start < u64::MAX);
         assert_eq!(range.end, u64::MAX);
-        assert_eq!(p.active_count(), 1);
     }
 
     #[test]
@@ -155,7 +139,6 @@ mod tests {
         let mut p = NoncePartitioner::new();
         let r1 = p.assign(&"miner_0".to_string());
         let r2 = p.assign(&"miner_1".to_string());
-        assert_eq!(p.active_count(), 2);
         // With 2^64 space, collision of random starts is astronomically unlikely.
         assert_ne!(r1.start, r2.start);
     }
@@ -167,27 +150,14 @@ mod tests {
         let r2 = p.assign(&"miner_0".to_string());
         // Same range returned on second call.
         assert_eq!(r1.start, r2.start);
-        assert_eq!(p.active_count(), 1);
     }
 
     #[test]
     fn reclaim_frees_miner() {
         let mut p = NoncePartitioner::new();
         p.assign(&"miner_0".to_string());
-        assert_eq!(p.active_count(), 1);
         p.reclaim(&"miner_0".to_string());
-        assert_eq!(p.active_count(), 0);
-    }
-
-    #[test]
-    fn reset_clears_all() {
-        let mut p = NoncePartitioner::new();
-        p.assign(&"miner_0".to_string());
-        p.assign(&"miner_1".to_string());
-        p.assign(&"miner_2".to_string());
-        assert_eq!(p.active_count(), 3);
-        p.reset();
-        assert_eq!(p.active_count(), 0);
+        assert!(p.get_range("miner_0").is_none());
     }
 
     #[test]
@@ -196,12 +166,10 @@ mod tests {
         for i in 0..10 {
             p.assign(&format!("miner_{i}"));
         }
-        assert_eq!(p.active_count(), 10);
 
         let to_reclaim = vec!["miner_2".to_string(), "miner_5".to_string(), "miner_7".to_string()];
         let reclaimed = p.reclaim_all(&to_reclaim);
         assert_eq!(reclaimed, 3);
-        assert_eq!(p.active_count(), 7);
 
         for id in &to_reclaim {
             assert!(p.get_range(id).is_none());
@@ -215,12 +183,11 @@ mod tests {
     fn reclaim_all_ignores_unknown_miners() {
         let mut p = NoncePartitioner::new();
         p.assign(&"miner_0".to_string());
-        assert_eq!(p.active_count(), 1);
 
         let unknowns = vec!["ghost_0".to_string(), "ghost_1".to_string()];
         let reclaimed = p.reclaim_all(&unknowns);
         assert_eq!(reclaimed, 0);
-        assert_eq!(p.active_count(), 1);
+        assert!(p.get_range("miner_0").is_some());
     }
 
     #[test]
@@ -236,7 +203,6 @@ mod tests {
         // miner_0's start nonce is unchanged — no repartitioning.
         assert_eq!(p.get_range("miner_0").unwrap().start, start_before);
         assert_ne!(r0.start, p.get_range("miner_1").unwrap().start);
-        assert_eq!(p.active_count(), 3);
     }
 
     #[test]
@@ -260,7 +226,7 @@ mod tests {
         let start1 = p.get_range("miner_0").unwrap().start;
 
         p.reclaim(&"miner_0".to_string());
-        assert_eq!(p.active_count(), 0);
+        assert!(p.get_range("miner_0").is_none());
 
         // Re-assigning gets a fresh random start.
         p.assign(&"miner_0".to_string());
