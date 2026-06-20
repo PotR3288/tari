@@ -589,20 +589,14 @@ impl InnerService {
             .get_range(miner_id)
             .unwrap_or_else(|| 0..u64::MAX);
 
-        // Collect all current nonce allocations for test verification
-        let all_ranges = self.nonce_partitioner.read().await.get_all_ranges();
-        let miner_nonce_ranges_json: Vec<serde_json::Value> = all_ranges
-            .iter()
-            .map(|(mid, range)| {
-                json!({
-                    "miner_id": mid,
-                    "nonce_range": {
-                        "start": range.start,
-                        "end": range.end,
-                    },
-                })
-            })
-            .collect();
+        // Return only this miner's own nonce allocation (no cross-miner leakage)
+        let miner_nonce_ranges_json = vec![json!({
+            "miner_id": miner_id,
+            "nonce_range": {
+                "start": miner_nonce_range.start,
+                "end": miner_nonce_range.end,
+            },
+        })];
 
         let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
         let blob_hex = hex::encode(&blob);
