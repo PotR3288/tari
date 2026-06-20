@@ -51,10 +51,6 @@ pub struct MinerRegistryConfig {
     pub miner_timeout_secs: u64,
     /// Whether miners may supply their own payment address.
     pub allow_custom_payment: bool,
-    /// Minimum nonce range size per miner (used by NoncePartitioner, stored here for config centralization).
-    // TODO: wire into NoncePartitioner::assign() as dynamic minimum instead of hard-coded MIN_NONCE_RANGE_SIZE
-    #[allow(dead_code)]
-    pub min_nonce_range_size: u64,
 }
 
 /// Registry of connected miners — the authoritative source for miner identity and state.
@@ -188,7 +184,6 @@ mod tests {
             max_miners: 32,
             miner_timeout_secs: 300,
             allow_custom_payment: true,
-            min_nonce_range_size: 65536,
         }
     }
 
