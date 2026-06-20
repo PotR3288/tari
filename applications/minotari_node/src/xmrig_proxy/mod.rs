@@ -99,7 +99,6 @@ pub async fn run_xmrig_proxy(
         max_miners,
         miner_timeout_secs,
         allow_custom_payment: true,
-        min_nonce_range_size: 65536,
     });
     let nonce_partitioner = Arc::new(RwLock::new(NoncePartitioner::new()));
 
