@@ -275,7 +275,7 @@ impl InnerService {
                     .checked_sub(1)
                     .map(|h| h)
             });
-            let should_evict = if let Some(height) = new_block_algo.checked_sub(1) {
+            let should_evict = if let Some(height) = new_block_algo {
                 match handler.get_header(height).await {
                     Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
                     _ => false,
