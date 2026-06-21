@@ -137,39 +137,6 @@ fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
     )
 }
 
-/// Extract a registration ID for the MinerRegistry.
-///
-/// Used to deduplicate miners in the registry (max_miners counting). Multiple TCP
-/// connections from the same physical miner — whether multi-threaded or behind NAT —
-/// share one registration entry keyed by IP + wallet address.
-///
-/// Resolution:
-/// 1. `params.wallet_address` — if present, use its base58 string as part of the ID.
-/// 2. Peer IP (without port) — fallback for clients that don't provide a wallet address.
-fn parse_registration_id(req: &Value, peer_addr: SocketAddr) -> String {
-    // Layer 1: wallet address from request
-    if let Some(addr) = parse_wallet_address_from_request(req) {
-        return format!("{}:{}", peer_addr.ip(), addr);
-    }
-
-    // Layer 2: peer IP (without port) — fallback for clients that don't provide a wallet address.
-    if peer_addr != SocketAddr::from(([0, 0, 0, 0], 0)) {
-        return format!("{}:default", peer_addr.ip());
-    }
-
-    // Layer 3: auto-generated unique ID — monotonic counter guarantees uniqueness
-    static NEXT_REG_ID: AtomicU64 = AtomicU64::new(0);
-    let id = NEXT_REG_ID.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "auto_{}_{}",
-        id,
-        std::time::SystemTime::now()
-            .elapsed()
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    )
-}
-
 /// Extract an optional wallet address override from a JSON-RPC request.
 fn parse_wallet_address_from_request(req: &Value) -> Option<TariAddress> {
     let address_str = req
@@ -265,9 +232,6 @@ impl InnerService {
         // 1. Parse miner identity from request (two-layer: extra_nonce > peer_addr for nonce partitioning).
         let miner_id = parse_miner_id_from_request(req, self.peer_addr);
 
-        // 2. Parse registration ID for MinerRegistry deduplication (IP + wallet_address).
-        let registration_id = parse_registration_id(req, self.peer_addr);
-
         let requested_wallet_address = parse_wallet_address_from_request(req);
         let payment_address = match &requested_wallet_address {
             Some(addr) if addr.network() == self.network => requested_wallet_address.clone().unwrap(),
@@ -289,9 +253,9 @@ impl InnerService {
             },
         };
 
-        // 3. Register or refresh miner (uses registration_id for dedup).
+        // 3. Register or refresh miner by resolved payment address (dedup by wallet).
         self.miner_registry
-            .get_or_register(&registration_id, requested_wallet_address.clone())
+            .get_or_register(&payment_address)
             .await?;
 
         // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
@@ -311,7 +275,7 @@ impl InnerService {
                     .checked_sub(1)
                     .map(|h| h)
             });
-            let should_evict = if let Some(height) = new_block_algo {
+            let should_evict = if let Some(height) = new_block_algo.checked_sub(1) {
                 match handler.get_header(height).await {
                     Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
                     _ => false,
@@ -777,60 +741,6 @@ mod tests {
         let id1 = parse_miner_id_from_request(&req, zero_addr);
         let id2 = parse_miner_id_from_request(&req, zero_addr);
         assert_ne!(id1, id2);
-    }
-
-    // --- parse_registration_id (MinerRegistry deduplication ID) ---
-
-    #[test]
-    fn parse_registration_id_returns_ip_plus_wallet_address() {
-        let address = TariAddress::default();
-        let base58 = address.to_base58();
-        let req = json!({
-            "params": {
-                "wallet_address": base58
-            }
-        });
-        let dummy_addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
-        assert_eq!(parse_registration_id(&req, dummy_addr), format!("127.0.0.1:{}", address));
-    }
-
-    #[test]
-    fn parse_registration_id_returns_ip_default_when_no_wallet() {
-        let req = json!({});
-        let peer_addr = "192.168.1.5:42000".parse::<SocketAddr>().unwrap();
-        assert_eq!(parse_registration_id(&req, peer_addr), "192.168.1.5:default");
-    }
-
-    #[test]
-    fn parse_registration_id_generates_auto_id_when_peer_is_zero() {
-        let req = json!({});
-        let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
-        let id = parse_registration_id(&req, zero_addr);
-        assert!(id.starts_with("auto_"));
-    }
-
-    #[test]
-    fn parse_registration_id_generates_unique_auto_ids() {
-        let req = json!({});
-        let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
-        let id1 = parse_registration_id(&req, zero_addr);
-        let id2 = parse_registration_id(&req, zero_addr);
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn parse_registration_id_same_for_different_ports() {
-        // Multi-threaded miner: same IP, different ports → same registration ID
-        let address = TariAddress::default();
-        let base58 = address.to_base58();
-        let req = json!({
-            "params": {
-                "wallet_address": base58
-            }
-        });
-        let addr1 = "10.0.0.1:42000".parse::<SocketAddr>().unwrap();
-        let addr2 = "10.0.0.1:43000".parse::<SocketAddr>().unwrap();
-        assert_eq!(parse_registration_id(&req, addr1), parse_registration_id(&req, addr2));
     }
 
     // --- parse_wallet_address_from_request ---
