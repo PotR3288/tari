@@ -22,7 +22,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -68,7 +67,6 @@ pub struct TemplateEntry {
     pub inserted_at: Instant,
     pub wallet_address: TariAddress,
     pub assigned_miners: HashSet<MinerId>,
-    pub nonce_ranges: HashMap<MinerId, Range<u64>>,
     /// Difficulty from the node's block template (used for miner responses).
     pub target_difficulty: u64,
     /// PoW algorithm used to generate this template.
@@ -115,11 +113,10 @@ impl BlockTemplateStorage {
         block: Block,
         wallet_address: TariAddress,
         miner_id: MinerId,
-        nonce_range: Range<u64>,
         target_difficulty: u64,
         pow_algo: PowAlgorithm,
     ) {
-        info!(target: LOG_TARGET, "Storing template for address {} and miner ID {} with nonce range {:?}", miner_id.clone(), wallet_address.clone(), nonce_range.clone());
+        info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
         let mut map = self.inner.write().await;
         map.insert(
             key,
@@ -131,11 +128,6 @@ impl BlockTemplateStorage {
                     let mut set = HashSet::new();
                     set.insert(miner_id.clone());
                     set
-                },
-                nonce_ranges: {
-                    let mut hm = HashMap::new();
-                    hm.insert(miner_id, nonce_range);
-                    hm
                 },
                 target_difficulty,
                 pow_algo,
@@ -164,12 +156,11 @@ impl BlockTemplateStorage {
     /// Add a new miner to an existing template entry (template caching hit).
     ///
     /// Returns `true` if the template was found and the miner was added.
-    pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId, nonce_range: Range<u64>) -> bool {
-        debug!(target: LOG_TARGET, "Cache hit for miner ID {}, added with nonce range {:?}", miner_id.clone(), nonce_range.clone());
+    pub async fn add_miner_to_template(&self, key: [u8; 32], miner_id: MinerId) -> bool {
+        debug!(target: LOG_TARGET, "Cache hit for miner ID {}", miner_id.clone());
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&key) {
             entry.assigned_miners.insert(miner_id.clone());
-            entry.nonce_ranges.insert(miner_id, nonce_range);
             true
         } else {
             false
@@ -206,8 +197,7 @@ impl BlockTemplateStorage {
     /// so that stale templates are not served to miners on the next request. Only evicts templates
     /// whose `pow_algo` matches the given algorithm — templates from other algorithms remain valid.
     ///
-    /// Returns the set of all miner IDs associated with evicted entries, so callers can reclaim
-    /// their nonce ranges from the partitioner without a nuclear reset.
+    /// Returns the set of all miner IDs associated with evicted entries for future nonce-partitioning cleanup.
     pub async fn evict_for_algorithm(&self, algo: PowAlgorithm) -> HashSet<MinerId> {
         let mut map = self.inner.write().await;
         let before = map.len();
@@ -223,7 +213,7 @@ impl BlockTemplateStorage {
         map.retain(|_, e| e.pow_algo != algo);
         let removed = before.saturating_sub(map.len());
         if removed > 0 {
-            debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced), reclaiming {} miner IDs", removed, algo, evicted_miners.len());
+            debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced)", removed, algo);
         }
         evicted_miners
     }
@@ -276,7 +266,7 @@ mod tests {
         let address = TariAddress::default();
         let miner = "miner_1".to_string();
 
-        storage.store(key, block.clone(), address, miner, 0..1000, 1, PowAlgorithm::RandomXT).await;
+        storage.store(key, block.clone(), address, miner, 1, PowAlgorithm::RandomXT).await;
 
         let retrieved = storage.get(&key).await.unwrap();
         assert_eq!(retrieved, block);
@@ -297,7 +287,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, block.clone(), address, "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
+            .store(key, block.clone(), address, "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
 
         let taken = storage.take(&key).await.unwrap();
@@ -318,7 +308,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
 
         let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
@@ -333,7 +323,7 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         // Age the template beyond MAX_TEMPLATE_AGE
         set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
@@ -348,19 +338,15 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address, "miner_a".to_string(), 0..1000, 1, PowAlgorithm::RandomXT)
+            .store(key, make_test_block(), address, "miner_a".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
 
-        let added = storage
-            .add_miner_to_template(key, "miner_b".to_string(), 1000..2000)
-            .await;
+        let added = storage.add_miner_to_template(key, "miner_b".to_string()).await;
         assert!(added);
 
         let entry = storage.get_entry(&key).await.unwrap();
         assert!(entry.assigned_miners.contains("miner_a"));
         assert!(entry.assigned_miners.contains("miner_b"));
-        assert!(entry.nonce_ranges.contains_key("miner_a"));
-        assert!(entry.nonce_ranges.contains_key("miner_b"));
     }
 
     #[tokio::test]
@@ -371,10 +357,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key2, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
 
         // Age only key1
@@ -393,10 +379,10 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m1".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key, make_test_block(), address.clone(), "m1".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key, make_test_block(), address, "m2".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key, make_test_block(), address, "m2".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
 
         let entry = storage.get_entry(&key).await.unwrap();
@@ -442,10 +428,10 @@ mod tests {
 
         // Store a RandomXT template and a Sha3x template
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key1, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::Sha3x)
+            .store(key2, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::Sha3x)
             .await;
 
         assert!(storage.get(&key1).await.is_some());
@@ -481,10 +467,10 @@ mod tests {
 
         // Store a RandomXT template with two miners assigned.
         storage
-            .store(key1, make_test_block(), address.clone(), "miner_a".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key1, make_test_block(), address.clone(), "miner_a".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         let key = storage.get_for_address(&address).await.unwrap().0;
-        storage.add_miner_to_template(key, "miner_b".to_string(), 100..200).await;
+        storage.add_miner_to_template(key, "miner_b".to_string()).await;
 
         // Evict — should return both miner IDs.
         let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
@@ -501,7 +487,7 @@ mod tests {
 
         // Store a Sha3x template — RandomXT eviction should return empty.
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::Sha3x)
+            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::Sha3x)
             .await;
 
         let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
@@ -517,10 +503,10 @@ mod tests {
 
         // Store templates for different algorithms
         storage
-            .store(key_rx, make_test_block(), address.clone(), "m".to_string(), 0..100, 1, PowAlgorithm::RandomXT)
+            .store(key_rx, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
             .await;
         storage
-            .store(key_cuckaroo, make_test_block(), address, "m".to_string(), 0..100, 1, PowAlgorithm::Cuckaroo)
+            .store(key_cuckaroo, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::Cuckaroo)
             .await;
 
         // Evict RandomXT — Cuckaroo should survive

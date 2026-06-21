@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{net::SocketAddr, str::FromStr, sync::atomic::{AtomicU64, Ordering}, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::atomic::{AtomicU64, Ordering}};
 
 use hyper::{Response, StatusCode, body::Bytes};
 use log::{debug, info, trace, warn};
@@ -48,14 +48,12 @@ use tari_transaction_components::{
     },
 };
 use tari_utilities::ByteArray;
-use tokio::sync::RwLock;
 
 use super::{
     MinerId,
     block_template_storage::{BlockTemplateStorage, ChainTip},
     error::XmrigProxyError,
     miner_registry::MinerRegistry,
-    nonce_partition::NoncePartitioner,
     service::{ProxyBody, json_response},
 };
 
@@ -92,7 +90,6 @@ pub struct InnerService {
     pub coinbase_extra: Vec<u8>,
     pub range_proof_type: RangeProofType,
     pub miner_registry: MinerRegistry,
-    pub nonce_partitioner: Arc<RwLock<NoncePartitioner>>,
     /// The remote socket address of the miner that opened this connection.
     pub peer_addr: SocketAddr,
 }
@@ -324,14 +321,7 @@ impl InnerService {
             };
             if should_evict {
                 debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-                let evicted_miner_ids = self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-
-                // Reclaim nonce ranges for miners associated with evicted templates.
-                // Active miners whose templates survived (non-RandomXT tip advance) keep their ranges.
-                if !evicted_miner_ids.is_empty() {
-                    let reclaimed = self.nonce_partitioner.write().await.reclaim_all(&evicted_miner_ids);
-                    debug!(target: LOG_TARGET, "Reclaimed {} nonce ranges after template eviction", reclaimed);
-                }
+                self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
             } else {
                 debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}) by non-RandomXT block, keeping RandomXT templates", current_tip.height, current_tip.top_hash);
             }
@@ -339,16 +329,8 @@ impl InnerService {
 
         let next_height = meta.best_block_height().saturating_add(1);
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
-            let nonce_range = self.nonce_partitioner.write().await.assign(&miner_id);
-
-            // Record the mapping so eviction can reclaim this nonce range later.
-            self.miner_registry
-                .register_nonce_partitioner_id(&registration_id, &miner_id)
-                .await;
-
-            self.block_templates
-                .add_miner_to_template(cached_key, miner_id.clone(), nonce_range)
-                .await;
+            // Add miner to the cached template (no nonce partitioning — random assignment at submit time)
+            self.block_templates.add_miner_to_template(cached_key, miner_id.clone()).await;
 
             debug!(
                 target: LOG_TARGET,
@@ -501,14 +483,7 @@ impl InnerService {
             .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
             .hash();
 
-        // Assign nonce range and store template with miner context
-        let nonce_range = self.nonce_partitioner.write().await.assign(&miner_id);
-
-        // Record the mapping so eviction can reclaim this nonce range later.
-        self.miner_registry
-            .register_nonce_partitioner_id(&registration_id, &miner_id)
-            .await;
-
+        // Assign nonce range and store template with miner context (no partitioning — random at submit time)
         let mining_hash_key: [u8; 32] = mining_hash
             .as_slice()
             .try_into()
@@ -520,7 +495,6 @@ impl InnerService {
                 new_block,
                 payment_address.clone(),
                 miner_id.clone(),
-                nonce_range,
                 target_difficulty,
                 PowAlgorithm::RandomXT,
             )
@@ -582,22 +556,6 @@ impl InnerService {
             .as_u64();
 
         // Build the 76-byte XMRig-compatible mining blob
-        let miner_nonce_range = self
-            .nonce_partitioner
-            .read()
-            .await
-            .get_range(miner_id)
-            .unwrap_or_else(|| 0..u64::MAX);
-
-        // Return only this miner's own nonce allocation (no cross-miner leakage)
-        let miner_nonce_ranges_json = vec![json!({
-            "miner_id": miner_id,
-            "nonce_range": {
-                "start": miner_nonce_range.start,
-                "end": miner_nonce_range.end,
-            },
-        })];
-
         let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
         let blob_hex = hex::encode(&blob);
         let seed_hex = hex::encode(vm_key);
@@ -605,8 +563,7 @@ impl InnerService {
 
         debug!(
             target: LOG_TARGET,
-            "Template response for height #{block_height}, miner {miner_id}, range {:?}",
-            miner_nonce_range
+            "Template response for height #{block_height}, miner {miner_id}",
         );
 
         json_response(
@@ -625,11 +582,6 @@ impl InnerService {
                     "status": "OK",
                     "untrusted": false,
                     "miner_id": miner_id,
-                    "nonce_range": {
-                        "start": miner_nonce_range.start,
-                        "end": miner_nonce_range.end,
-                    },
-                    "miner_nonce_ranges": miner_nonce_ranges_json,
                 }),
             ),
         )
