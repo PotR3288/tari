@@ -24,13 +24,12 @@ mod block_template_storage;
 mod error;
 mod inner;
 mod miner_registry;
-mod nonce_partition;
 mod service;
 
 /// Miner identity key — the `extra_nonce` hex string sent by XMRig.
 pub(crate) type MinerId = String;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use futures::FutureExt;
 use hyper::server::conn::http1;
@@ -46,13 +45,12 @@ use tari_core::{
 use tari_shutdown::ShutdownSignal;
 use tari_transaction_components::transaction_components::RangeProofType;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 
 use self::{
     block_template_storage::BlockTemplateStorage,
     inner::InnerService,
     miner_registry::{MinerRegistry, MinerRegistryConfig},
-    nonce_partition::NoncePartitioner,
+    // nonce_partition::NoncePartitioner — kept for future use when scaling to thousands of miners
     service::XmrigProxyService,
 };
 
@@ -93,33 +91,23 @@ pub async fn run_xmrig_proxy(
     let listen_addr = multiaddr_to_socketaddr(&listener_address)?;
     let block_templates = BlockTemplateStorage::new();
 
-    // Create shared miner registry and nonce partitioner before spawning cleanup tasks
+    // Create shared miner registry before spawning cleanup tasks
     let miner_registry = MinerRegistry::new(MinerRegistryConfig {
         default_payment_address: wallet_payment_address.clone(),
         max_miners,
         miner_timeout_secs,
         allow_custom_payment: true,
     });
-    let nonce_partitioner = Arc::new(RwLock::new(NoncePartitioner::new()));
 
     // Periodic cleanup of expired templates and stale miners
     let cleanup_storage = block_templates.clone();
     let cleanup_registry = miner_registry.clone();
-    let cleanup_partitioner = nonce_partitioner.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         loop {
             interval.tick().await;
-            // Evict stale miners and reclaim their nonce ranges.
-            // evict_stale returns (registration_ids, nonce_partitioner_ids) — the former are removed
-            // from MinerRegistry internally; the latter must be reclaimed from NoncePartitioner.
-            let (_reg_ids, np_ids) = cleanup_registry.evict_stale().await;
-            if !np_ids.is_empty() {
-                let mut partitioner = cleanup_partitioner.write().await;
-                for id in np_ids {
-                    partitioner.reclaim(&id);
-                }
-            }
+            // Evict stale miners from the registry.
+            cleanup_registry.evict_stale().await;
             // Remove outdated templates
             if let Err(e) = std::panic::AssertUnwindSafe(cleanup_storage.remove_outdated())
                 .catch_unwind()
@@ -136,7 +124,6 @@ pub async fn run_xmrig_proxy(
         state_machine,
         block_templates,
         miner_registry,
-        nonce_partitioner,
         wallet_payment_address,
         network,
         coinbase_extra,
@@ -163,7 +150,7 @@ pub async fn run_xmrig_proxy(
                     result = listener.accept() => {
                         match result {
                             Ok((tcp, addr)) => {
-                                // debug!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
+                                debug!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
                                 // Clone the inner service and set peer_addr to the real remote address
                                 let mut inner = service.inner.clone();
                                 inner.peer_addr = addr;
