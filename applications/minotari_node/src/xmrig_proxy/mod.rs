@@ -150,7 +150,7 @@ pub async fn run_xmrig_proxy(
                     result = listener.accept() => {
                         match result {
                             Ok((tcp, addr)) => {
-                                debug!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
+                                // debug!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
                                 // Clone the inner service and set peer_addr to the real remote address
                                 let mut inner = service.inner.clone();
                                 inner.peer_addr = addr;
