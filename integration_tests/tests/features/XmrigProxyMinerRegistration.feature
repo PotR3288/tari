@@ -28,7 +28,7 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
     Then the JSON-RPC response status is OK
 
   # -----------------------------------------------------------------------
-  # Scenario A3: Custom payment address accepted when allow_custom_payment=true
+  # Scenario A3: Custom payment address accepted (miners may supply their own)
   # Verifies that a miner can supply its own wallet address and still get
   # a valid template response (the proxy accepts it without error).
   # -----------------------------------------------------------------------
@@ -58,14 +58,13 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
   # Verifies that when the hard cap (max_miners=3 in tests) is exceeded,
   # new miner registrations receive an error instead of a template.
   # Key: each miner must use a DIFFERENT valid TariAddress so they get
-  # distinct registration_ids ("IP:<TariAddress>") and count separately
-  # against the max_miners cap. Invalid strings fall back to "127.0.0.1:default"
-  # which deduplicates all localhost connections into one miner.
+  # distinct registry entries and count separately against the max_miners cap.
+  # Invalid strings fall back to the config default address which deduplicates
+  # all localhost connections into one miner entry.
   # -----------------------------------------------------------------------
   Scenario: Exceeding max miners returns error
     # Each call generates a unique valid LocalNet TariAddress so each connection
-    # gets a distinct registration_id ("127.0.0.1:<TariAddress>") and counts
-    # separately against the max_miners cap (set to 3 in test config).
+    # gets a distinct registry entry and counts separately against the max_miners cap (set to 3 in test config).
     When I request a block template from NODE with a random wallet address
 
     When I request a block template from NODE with a random wallet address

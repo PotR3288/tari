@@ -831,7 +831,7 @@ fn xmrig_proxy_assert_height_greater(world: &mut TariWorld, name: String) {
 
 /// Send a getblocktemplate request with a randomly generated LocalNet TariAddress.
 /// Each call creates its own reqwest::Client to ensure distinct peer_addr, and
-/// generates a unique TariAddress so each connection gets a distinct registration_id.
+/// generates a unique TariAddress so each connection gets a distinct registry entry.
 #[when(expr = r"I request a block template from {word} with a random wallet address")]
 async fn xmrig_proxy_get_template_with_random_wallet(
     world: &mut TariWorld,
@@ -840,7 +840,7 @@ async fn xmrig_proxy_get_template_with_random_wallet(
     let port = get_xmrig_proxy_port(world, &base_node_name);
 
     // Generate a unique LocalNet TariAddress for this request.
-    // Each call produces a distinct address so registration_ids don't collide.
+    // Each call produces a distinct address so registry entries don't collide.
     let pk = PrivateKey::random(&mut rand::rng());
     let cpk = CompressedPublicKey::from_secret_key(&pk);
     let addr: TariAddress = tari_common_types::tari_address::TariAddress::new_dual_address_with_default_features(
