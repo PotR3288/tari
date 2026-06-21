@@ -34,7 +34,7 @@ use std::time::Duration;
 use futures::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
-use log::{error, debug, info};
+use log::{error, info};
 use tari_common::configuration::Network;
 use tari_common_types::tari_address::TariAddress;
 use tari_comms::{multiaddr::Multiaddr, utils::multiaddr::multiaddr_to_socketaddr};
@@ -50,7 +50,6 @@ use self::{
     block_template_storage::BlockTemplateStorage,
     inner::InnerService,
     miner_registry::{MinerRegistry, MinerRegistryConfig},
-    // nonce_partition::NoncePartitioner — kept for future use when scaling to thousands of miners
     service::XmrigProxyService,
 };
 
@@ -93,10 +92,8 @@ pub async fn run_xmrig_proxy(
 
     // Create shared miner registry before spawning cleanup tasks
     let miner_registry = MinerRegistry::new(MinerRegistryConfig {
-        default_payment_address: wallet_payment_address.clone(),
         max_miners,
         miner_timeout_secs,
-        allow_custom_payment: true,
     });
 
     // Periodic cleanup of expired templates and stale miners
