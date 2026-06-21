@@ -35,9 +35,6 @@ pub struct MinerEntry {
     pub payment_address: TariAddress,
     /// Last time the miner sent a valid request.
     pub last_activity: Instant,
-    /// Nonce-partitioning IDs associated with this registration (extra_nonce or peer socket).
-    /// Used by eviction to reclaim nonce ranges from NoncePartitioner.
-    pub nonce_partitioner_ids: Vec<MinerId>,
 }
 
 /// Configuration for the miner registry.
@@ -113,7 +110,6 @@ impl MinerRegistry {
         let entry = MinerEntry {
             payment_address: resolved_address,
             last_activity: now,
-            nonce_partitioner_ids: Vec::new(),
         };
 
         let entry_clone = entry.clone();
@@ -129,21 +125,8 @@ impl MinerRegistry {
         self.inner.write().await.remove(miner_id)
     }
 
-    /// Record that a nonce-partitioning `miner_id` (extra_nonce or peer socket) belongs to this registration.
-    /// Called when NoncePartitioner assigns a range so eviction can reclaim it later.
-    pub async fn register_nonce_partitioner_id(&self, registration_id: &MinerId, miner_id: &MinerId) {
-        let mut map = self.inner.write().await;
-        if let Some(entry) = map.get_mut(registration_id) {
-            if !entry.nonce_partitioner_ids.contains(miner_id) {
-                entry.nonce_partitioner_ids.push(miner_id.clone());
-            }
-        }
-    }
-
     /// Remove all miners inactive for longer than `config.miner_timeout_secs`.
-    /// Returns a tuple of (registration_ids, nonce_partitioner_ids) so the caller can
-    /// evict from both MinerRegistry and NoncePartitioner.
-    pub async fn evict_stale(&self) -> (Vec<MinerId>, Vec<MinerId>) {
+    pub async fn evict_stale(&self) -> Vec<MinerId> {
         let mut map = self.inner.write().await;
         let timeout = std::time::Duration::from_secs(self.config.miner_timeout_secs);
         let cutoff = Instant::now().checked_sub(timeout).unwrap_or(Instant::now());
@@ -154,16 +137,11 @@ impl MinerRegistry {
             .map(|(id, _)| id.clone())
             .collect();
 
-        // Collect nonce_partitioner_ids before removing entries
-        let mut nonce_partitioner_ids = Vec::new();
         for id in &stale_ids {
-            if let Some(entry) = map.get(id) {
-                nonce_partitioner_ids.extend(entry.nonce_partitioner_ids.clone());
-            }
             map.remove(id);
         }
 
-        (stale_ids, nonce_partitioner_ids)
+        stale_ids
     }
 
     /// Get current miner count.
@@ -254,32 +232,8 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let (reg_ids, np_ids) = registry.evict_stale().await;
+        let reg_ids = registry.evict_stale().await;
         assert_eq!(reg_ids.len(), 1);
         assert_eq!(reg_ids[0], "old");
-        // No nonce_partitioner_ids were registered, so this should be empty.
-        assert_eq!(np_ids.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn evict_stale_returns_nonce_partitioner_ids() {
-        let mut config = make_config();
-        config.miner_timeout_secs = 1;
-        let registry = MinerRegistry::new(config);
-        // Register a miner with both registration and nonce-partitioner IDs.
-        registry
-            .get_or_register(&"reg_1".to_string(), None)
-            .await
-            .unwrap();
-        registry.register_nonce_partitioner_id(&"reg_1".to_string(), &"np_deadbeef".to_string()).await;
-        registry.register_nonce_partitioner_id(&"reg_1".to_string(), &"np_cafe0000".to_string()).await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let (reg_ids, np_ids) = registry.evict_stale().await;
-        assert_eq!(reg_ids.len(), 1);
-        assert_eq!(reg_ids[0], "reg_1");
-        assert_eq!(np_ids.len(), 2);
-        assert!(np_ids.contains(&"np_deadbeef".to_string()));
-        assert!(np_ids.contains(&"np_cafe0000".to_string()));
     }
 }
