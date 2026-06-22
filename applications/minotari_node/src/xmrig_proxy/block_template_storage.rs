@@ -134,7 +134,6 @@ impl BlockTemplateStorage {
             },
         );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
-
     }
 
     /// Look up a cached template by wallet address.
