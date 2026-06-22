@@ -302,7 +302,14 @@ impl InnerService {
                 payment_address
             );
 
-            return self.build_template_response(&cached_key, &miner_id, req).await;
+            // Re-validate after potential eviction — a concurrent request or reorg may have evicted
+            // this template between the cache lookup above and now. If it's gone, fall through to
+            // generate a fresh one instead of returning "Template disappeared" error.
+            if self.block_templates.get(&cached_key).await.is_none() {
+                debug!(target: LOG_TARGET, "Cached template for address {} was evicted between lookup and response build, regenerating", payment_address);
+            } else {
+                return self.build_template_response(&cached_key, &miner_id, req).await;
+            }
         }
 
         // 4. No cached template — generate a new one
