@@ -20,10 +20,13 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+mod blob;
 mod block_template_storage;
 mod error;
 mod inner;
+mod json_rpc;
 mod miner_registry;
+mod request_parser;
 mod service;
 
 /// Miner identity key — the `extra_nonce` hex string sent by XMRig.
