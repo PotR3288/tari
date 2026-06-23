@@ -50,7 +50,7 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use super::{
-    blob::{build_tari_mining_blob, parse_mining_blob, TARI_BLOB_RESERVED_OFFSET},
+    blob::{build_tari_mining_blob, parse_mining_blob, POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET},
     block_template_storage::{BlockTemplateStorage, ChainTip},
     error::XmrigProxyError,
     json_rpc::{json_rpc_error, json_rpc_success},
@@ -461,7 +461,7 @@ impl InnerService {
             .as_u64();
 
         // Build the 76-byte XMRig-compatible mining blob
-        let blob = build_tari_mining_blob(&mining_hash, 0u64, 2);
+        let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
         let blob_hex = hex::encode(&blob);
         let seed_hex = hex::encode(vm_key);
         let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
