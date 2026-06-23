@@ -49,7 +49,7 @@ const TARI_NONCE_SIZE: usize = 8;
 const TARI_MINING_BLOB_SIZE: usize = 76;
 
 /// The pow_algo byte value for RandomXT (= 2).
-const POW_ALGO_RANDOMXT: u8 = 2;
+pub const POW_ALGO_RANDOMXT: u8 = 2;
 
 use crate::xmrig_proxy::error::XmrigProxyError;
 
