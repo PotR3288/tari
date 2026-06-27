@@ -453,6 +453,10 @@ impl InnerService {
 
         let target_difficulty_val = self.block_templates.get_target_difficulty(mining_hash_key).await.unwrap_or(600);
 
+        // Generate a random min_nonce for this template (full u64 space, random start)
+        let min_nonce: u64 = rand::random();
+        let max_nonce: u64 = u64::MAX;
+
         // Calculate expected reward
         let expected_reward = self
             .consensus_rules
@@ -468,7 +472,7 @@ impl InnerService {
 
         debug!(
             target: LOG_TARGET,
-            "Template response for height #{block_height}, miner {miner_id}",
+            "Template response for height #{block_height}, miner {miner_id}, nonce range [{min_nonce}, {max_nonce}]",
         );
 
         json_response(
@@ -483,6 +487,8 @@ impl InnerService {
                     "height": block_height,
                     "prev_hash": prev_hash_hex,
                     "reserved_offset": TARI_BLOB_RESERVED_OFFSET,
+                    "min_nonce": min_nonce,
+                    "max_nonce": max_nonce,
                     "expected_reward": expected_reward,
                     "status": "OK",
                     "untrusted": false,
