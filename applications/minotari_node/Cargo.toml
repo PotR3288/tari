@@ -79,6 +79,7 @@ tower-http = { version = "0.6", features = ["limit"] }
 bytes = "1.1"
 hex = "0.4.2"
 hyper = { version = "1.6.0", features = ["full"] }
+rand = { workspace = true }
 hyper-util = "0.1"
 http-body-util = "0.1"
 
