@@ -79,6 +79,7 @@ pub fn parse_wallet_address_from_request(req: &Value) -> Option<TariAddress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_miner_id_from_request_extra_nonce_takes_priority_over_everything() {
