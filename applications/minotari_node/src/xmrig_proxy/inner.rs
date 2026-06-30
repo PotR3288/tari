@@ -204,11 +204,7 @@ impl InnerService {
             // Only evict RandomXT templates when a RandomXT block advances the tip.
             // Non-RandomXT blocks don't invalidate our cached template since we only
             // mine RandomXT and its target interval (480s) is much longer than other lanes.
-            let new_block_algo = handler.get_metadata().await.ok().and_then(|m| {
-                m.best_block_height()
-                    .checked_sub(1)
-                    .map(|h| h)
-            });
+            let new_block_algo = handler.get_metadata().await.ok().map(|m| m.best_block_height());
             let should_evict = if let Some(height) = new_block_algo {
                 match handler.get_header(height).await {
                     Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
