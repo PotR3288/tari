@@ -17,12 +17,12 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
 
   # -----------------------------------------------------------------------
   # Scenario A2: Existing miner re-registration updates last_activity
-  # Verifies that a second request from the same miner returns the same
-  # nonce range (idempotent registration) rather than creating a duplicate.
+  # Verifies that a second request from the same miner succeeds (idempotent
+  # registration) rather than creating a duplicate.
   # -----------------------------------------------------------------------
-  Scenario: Re-registering miner returns same nonce range
+  Scenario: Re-registering miner returns OK
     When I request a block template from NODE with miner ID "re_reg_miner"
-    And I store the nonce range for miner "re_reg_miner"
+    Then the JSON-RPC response status is OK
 
     When I request a block template from NODE with miner ID "re_reg_miner"
     Then the JSON-RPC response status is OK
@@ -76,32 +76,30 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
     Then the JSON-RPC response error code is -32603
 
   # -----------------------------------------------------------------------
-  # Scenario D1: Stale miner evicted after timeout → nonce range reclaimed
+  # Scenario D1: Stale miner evicted after timeout
   # Verifies that a miner inactive longer than miner_timeout_secs (1s in tests)
-  # is evicted, and its nonce range becomes available for reuse.
+  # is evicted, and a new miner can register successfully.
   # -----------------------------------------------------------------------
-  Scenario: Stale miner eviction reclaims nonce range
+  Scenario: Stale miner eviction allows new registration
     When I request a block template from NODE with miner ID "d1_stale_miner"
-    And I store the nonce range for miner "d1_stale_miner"
 
     # Wait for the miner to become stale (miner_timeout_secs=1 in test config)
     When I wait for miner eviction on base node NODE xmrig proxy
 
-    # Request from a different miner — should succeed and get a fresh range
+    # Request from a different miner — should succeed
     When I request a block template from NODE with miner ID "d1_new_miner"
     Then the JSON-RPC response status is OK
 
   # -----------------------------------------------------------------------
-  # Scenario D2: Evicted miner can re-register with fresh range
+  # Scenario D2: Evicted miner can re-register
   # Verifies liveness — eviction shouldn't permanently block a miner that reconnects.
   # -----------------------------------------------------------------------
-  Scenario: Re-registration after eviction gets fresh nonce range
+  Scenario: Re-registration after eviction succeeds
     When I request a block template from NODE with miner ID "d2_re_reg_miner"
-    And I store the nonce range for miner "d2_re_reg_miner"
 
     # Wait for the miner to become stale and be evicted
     When I wait for miner eviction on base node NODE xmrig proxy
 
-    # Re-register — should succeed with a fresh nonce range
+    # Re-register — should succeed
     When I request a block template from NODE with miner ID "d2_re_reg_miner"
     Then the JSON-RPC response status is OK
