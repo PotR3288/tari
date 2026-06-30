@@ -194,6 +194,94 @@ pub async fn mine_blocks_without_wallet(
     tokio::time::sleep(Duration::from_secs(5)).await;
 }
 
+/// Mine blocks using a specific PoW algorithm.
+///
+/// This is useful when the test needs to advance the chain with a particular
+/// algorithm — e.g. mining RandomXT blocks so that the XMRig proxy's
+/// per-algorithm eviction logic triggers on chain tip advance.
+pub async fn mine_blocks_with_algorithm(
+    base_client: &mut BaseNodeClient,
+    num_blocks: u64,
+    weight: u64,
+    key_manager: &KeyManager,
+    script_key_id: &TariKeyId,
+    wallet_payment_address: &TariAddress,
+    stealth_payment: bool,
+    consensus_manager: &BaseNodeConsensusManager,
+    pow_algo: i32,
+) {
+    for _ in 0..num_blocks {
+        let (block_template, _wallet_output) = create_block_template_with_coinbase_and_algo(
+            base_client,
+            weight,
+            key_manager,
+            script_key_id,
+            wallet_payment_address,
+            stealth_payment,
+            consensus_manager,
+            pow_algo,
+        )
+        .await;
+        mine_block_without_wallet_with_template(base_client, block_template).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Give some time for the base node and wallet to sync the new blocks
+    tokio::time::sleep(Duration::from_secs(5)).await;
+}
+
+async fn create_block_template_with_coinbase_and_algo(
+    base_client: &mut BaseNodeClient,
+    weight: u64,
+    key_manager: &KeyManager,
+    script_key_id: &TariKeyId,
+    wallet_payment_address: &TariAddress,
+    stealth_payment: bool,
+    consensus_manager: &BaseNodeConsensusManager,
+    pow_algo: i32,
+) -> (NewBlockTemplate, WalletOutput) {
+    let template_req = NewBlockTemplateRequest {
+        algo: Some(PowAlgo { pow_algo }),
+        max_weight: weight,
+    };
+
+    let template_response = base_client
+        .get_new_block_template(template_req)
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut block_template = template_response.new_block_template.clone().unwrap();
+
+    let template = template_response.new_block_template.as_ref().unwrap();
+    let miner_data = template_response.miner_data.as_ref().unwrap();
+    let fee = miner_data.total_fees;
+    let reward = miner_data.reward;
+    let height = template.header.as_ref().unwrap().height;
+
+    let (_, coinbase_output, coinbase_kernel, coinbase_wallet_output) = generate_coinbase_with_wallet_output(
+        MicroMinotari::from(fee),
+        MicroMinotari::from(reward),
+        height,
+        &CoinBaseExtra::default(),
+        key_manager,
+        script_key_id,
+        wallet_payment_address,
+        stealth_payment,
+        consensus_manager.consensus_constants(height),
+        RangeProofType::BulletProofPlus,
+        MemoField::new_open(vec![], TxType::Coinbase).unwrap(),
+    )
+    .unwrap();
+    let body = block_template.body.as_mut().unwrap();
+
+    let grpc_output = grpc_output_with_payref(coinbase_output, None).unwrap();
+    body.outputs.push(grpc_output);
+    body.kernels.push(coinbase_kernel.into());
+
+    (block_template, coinbase_wallet_output)
+}
+
 pub async fn mine_block(
     base_client: &mut BaseNodeClient,
     key_manager: &KeyManager,

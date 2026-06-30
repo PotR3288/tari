@@ -23,13 +23,14 @@
 use cucumber::gherkin::Step;
 use cucumber::{then, when};
 use hex;
+use minotari_app_grpc::tari_rpc::pow_algo::PowAlgos;
 use serde_json::{Value, json};
 use tari_common_types::{
     tari_address::TariAddress,
     types::{CompressedPublicKey, PrivateKey},
 };
 use tari_crypto::keys::SecretKey;
-use tari_integration_tests::{miner::mine_blocks_without_wallet, TariWorld};
+use tari_integration_tests::{miner::mine_blocks_with_algorithm, TariWorld};
 
 // Helper to resolve the XMRig proxy port for a given base node
 fn get_xmrig_proxy_port(world: &TariWorld, base_node_name: &String) -> u16 {
@@ -338,8 +339,9 @@ async fn xmrig_proxy_wait_miner_eviction(world: &mut TariWorld, _base_node_name:
 async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name: String) {
     // Block templates are evicted from the in-memory store when a new template
     // is generated (chain tip advances or template rotation). We trigger a tip
-    // advance by mining 3 blocks on the base node, then make a getblocktemplate
-    // call to force the proxy to detect the new chain tip and evict cached templates.
+    // advance by mining 3 RandomXT blocks on the base node, then make a
+    // getblocktemplate call to force the proxy to detect the new chain tip and
+    // evict cached templates.
     use std::time::Duration;
 
     let mut client = world
@@ -347,7 +349,10 @@ async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name
         .await
         .expect("Couldn't get the node client to mine with");
     let script_key_id = &world.script_key_id().await;
-    mine_blocks_without_wallet(
+
+    // Mine RandomXT blocks so the proxy detects a RandomXT tip advance and
+    // evicts cached templates (per-algorithm eviction).
+    mine_blocks_with_algorithm(
         &mut client,
         3, // num_blocks
         0, // weight (default)
@@ -356,6 +361,7 @@ async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name
         &world.default_payment_address.clone(),
         false,
         &world.consensus_manager.clone(),
+        PowAlgos::Randomxt.into(),
     )
     .await;
 
@@ -383,6 +389,34 @@ async fn xmrig_proxy_wait_template_expiry(world: &mut TariWorld, _base_node_name
 
     // Give the proxy time to process the eviction before submitblock runs.
     tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+// ---------------------------------------------------------------------------
+// RandomXT block mining step (for XMRig proxy eviction tests)
+// ---------------------------------------------------------------------------
+
+/// Mine blocks using RandomXT algorithm so the proxy detects a RandomXT tip advance
+/// and evicts cached templates (per-algorithm eviction).
+#[when(expr = r"I mine {int} RandomXT blocks on {word}")]
+async fn xmrig_proxy_mine_randomxt_blocks(world: &mut TariWorld, num_blocks: u64, base_node_name: String) {
+    let mut client = world
+        .get_node_client(&base_node_name)
+        .await
+        .expect("Couldn't get the node client to mine with");
+    let script_key_id = &world.script_key_id().await;
+
+    mine_blocks_with_algorithm(
+        &mut client,
+        num_blocks,
+        0, // weight (default)
+        &world.key_manager,
+        script_key_id,
+        &world.default_payment_address.clone(),
+        false,
+        &world.consensus_manager.clone(),
+        PowAlgos::Randomxt.into(),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
