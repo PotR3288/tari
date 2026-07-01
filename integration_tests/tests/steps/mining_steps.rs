@@ -30,10 +30,7 @@ use tari_integration_tests::{
     TariWorld,
     base_node_process::spawn_base_node,
     miner::{
-        mine_block,
-        mine_block_before_submit,
-        mine_block_with_coinbase_on_node,
-        mine_blocks_without_wallet,
+        mine_block, mine_block_before_submit, mine_block_with_coinbase_on_node, mine_blocks_without_wallet,
         register_miner_process,
     },
     wallet_process::{create_wallet_client, spawn_wallet},
@@ -166,8 +163,8 @@ async fn while_mining_all_txs_in_wallet_are_mined_confirmed(world: &mut TariWorl
             };
             let res = wallet_client.get_transaction_info(req).await.unwrap().into_inner();
             let tx_status = res.transactions.first().unwrap().status;
-            if tx_status == grpc::TransactionStatus::MinedConfirmed as i32 ||
-                tx_status == grpc::TransactionStatus::OneSidedConfirmed as i32
+            if tx_status == grpc::TransactionStatus::MinedConfirmed as i32
+                || tx_status == grpc::TransactionStatus::OneSidedConfirmed as i32
             {
                 println!("Wallet transaction with id {tx_id} has been detected with status Mined_or_OneSidedConfirmed");
                 break 'inner;
@@ -222,8 +219,8 @@ async fn while_mining_in_node_all_txs_in_wallet_are_mined_confirmed(
             };
             let res = wallet_client.get_transaction_info(req).await.unwrap().into_inner();
             let tx_status = res.transactions.first().unwrap().status;
-            if tx_status == grpc::TransactionStatus::MinedConfirmed as i32 ||
-                tx_status == grpc::TransactionStatus::OneSidedConfirmed as i32
+            if tx_status == grpc::TransactionStatus::MinedConfirmed as i32
+                || tx_status == grpc::TransactionStatus::OneSidedConfirmed as i32
             {
                 println!("Transaction with id {tx_id} has been Mined_or_OneSidedConfirmed");
                 mined_status_flag = true;

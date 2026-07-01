@@ -30,7 +30,7 @@ use tari_common_types::{
     types::{CompressedPublicKey, PrivateKey},
 };
 use tari_crypto::keys::SecretKey;
-use tari_integration_tests::{miner::mine_blocks_with_algorithm, TariWorld};
+use tari_integration_tests::{TariWorld, miner::mine_blocks_with_algorithm};
 
 // Helper to resolve the XMRig proxy port for a given base node
 fn get_xmrig_proxy_port(world: &TariWorld, base_node_name: &String) -> u16 {
@@ -139,23 +139,14 @@ async fn xmrig_proxy_get_getinfo(world: &mut TariWorld, base_node_name: String) 
 // Raw JSON-RPC request steps
 // ---------------------------------------------------------------------------
 
-#[when(
-    expr = r"I send a raw JSON-RPC request to base node {word} xmrig proxy:"
-)]
-async fn xmrig_proxy_raw_request(
-    world: &mut TariWorld,
-    base_node_name: String,
-    step: &Step,
-) {
+#[when(expr = r"I send a raw JSON-RPC request to base node {word} xmrig proxy:")]
+async fn xmrig_proxy_raw_request(world: &mut TariWorld, base_node_name: String, step: &Step) {
     let port = get_xmrig_proxy_port(world, &base_node_name);
     let url = format!("http://127.0.0.1:{port}/");
 
-    let body_text = step
-        .docstring
-        .as_deref()
-        .expect("doc string body not found");
-    let req_body: Value = serde_json::from_str(body_text)
-        .unwrap_or_else(|_| panic!("Invalid JSON-RPC request body: {body_text}"));
+    let body_text = step.docstring.as_deref().expect("doc string body not found");
+    let req_body: Value =
+        serde_json::from_str(body_text).unwrap_or_else(|_| panic!("Invalid JSON-RPC request body: {body_text}"));
 
     let resp = reqwest::Client::new()
         .post(url)
@@ -188,7 +179,8 @@ async fn xmrig_proxy_get_getblocktemplate(world: &mut TariWorld, base_node_name:
     });
 
     let proxy_client = reqwest::Client::new();
-    world.last_xmrig_proxy_response = proxy_client.post(format!("http://127.0.0.1:{port}/"))
+    world.last_xmrig_proxy_response = proxy_client
+        .post(format!("http://127.0.0.1:{port}/"))
         .json(&req_body)
         .send()
         .await
@@ -222,8 +214,12 @@ async fn xmrig_proxy_submit_stored_blob_with_nonce(world: &mut TariWorld, nonce:
 
     // Decode, patch nonce at offset 35 (big-endian), re-encode
     let mut blob = hex::decode(blob_hex).expect("Failed to decode stored block template blob hex");
-    assert!(blob.len() >= TARI_BLOB_RESERVED_OFFSET + TARI_NONCE_SIZE,
-        "Blob too short ({}) to contain nonce at offset {}", blob.len(), TARI_BLOB_RESERVED_OFFSET);
+    assert!(
+        blob.len() >= TARI_BLOB_RESERVED_OFFSET + TARI_NONCE_SIZE,
+        "Blob too short ({}) to contain nonce at offset {}",
+        blob.len(),
+        TARI_BLOB_RESERVED_OFFSET
+    );
 
     let nonce_bytes = nonce.to_be_bytes();
     for (i, b) in nonce_bytes.iter().enumerate() {
@@ -650,12 +646,9 @@ fn xmrig_proxy_assert_prev_hash_changed(world: &mut TariWorld, name: String) {
         .expect("'result.prev_hash' must be a string");
 
     assert_ne!(
-        actual,
-        &expected,
+        actual, &expected,
         "Expected prev_hash to differ from '{}', but got '{}'. Full response: {}",
-        expected,
-        actual,
-        world.last_xmrig_proxy_response
+        expected, actual, world.last_xmrig_proxy_response
     );
 }
 
@@ -675,9 +668,9 @@ fn xmrig_proxy_assert_height_greater(world: &mut TariWorld, name: String) {
         .and_then(Value::as_u64)
         .expect("'result.height' must be a number");
 
-    let expected_num: u64 = expected.parse().unwrap_or_else(|_| {
-        panic!("Stored value '{}' is not a valid number", name)
-    });
+    let expected_num: u64 = expected
+        .parse()
+        .unwrap_or_else(|_| panic!("Stored value '{}' is not a valid number", name));
 
     assert!(
         actual > expected_num,
@@ -697,10 +690,7 @@ fn xmrig_proxy_assert_height_greater(world: &mut TariWorld, name: String) {
 /// Each call creates its own reqwest::Client to ensure distinct peer_addr, and
 /// generates a unique TariAddress so each connection gets a distinct registry entry.
 #[when(expr = r"I request a block template from {word} with a random wallet address")]
-async fn xmrig_proxy_get_template_with_random_wallet(
-    world: &mut TariWorld,
-    base_node_name: String,
-) {
+async fn xmrig_proxy_get_template_with_random_wallet(world: &mut TariWorld, base_node_name: String) {
     let port = get_xmrig_proxy_port(world, &base_node_name);
 
     // Generate a unique LocalNet TariAddress for this request.
@@ -734,5 +724,3 @@ async fn xmrig_proxy_get_template_with_random_wallet(
 
     world.last_xmrig_proxy_response = resp;
 }
-
-
