@@ -27,7 +27,11 @@
 //!    Guarantees unique miner IDs even when multiple instances share the same wallet.
 //! 2. `peer_addr` — fall back to the remote socket address (IP:port) of the TCP connection.
 
-use std::{net::SocketAddr, str::FromStr, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    net::SocketAddr,
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use log::debug;
 use serde_json::Value;
