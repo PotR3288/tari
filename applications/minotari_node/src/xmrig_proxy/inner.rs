@@ -469,9 +469,13 @@ impl InnerService {
         let seed_hex = hex::encode(vm_key);
         let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
 
+        // Fetch current chain tip so the log reveals whether this template is stale.
+        let current_tip = self.get_chain_tip().await?;
+
         debug!(
             target: LOG_TARGET,
-            "Template response for height #{block_height}, miner {miner_id}, nonce range [{min_nonce}, {max_nonce}]",
+            "Template response for height #{block_height} (current tip: #{}), miner {miner_id}, nonce range [{min_nonce}, {max_nonce}]",
+            current_tip.height,
         );
 
         json_response(
