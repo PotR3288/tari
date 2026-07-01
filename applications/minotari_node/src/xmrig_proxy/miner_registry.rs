@@ -75,10 +75,7 @@ impl MinerRegistry {
     ///
     /// Returns `Err(MaxMinersReached)` if the cap is exceeded and the miner is unknown.
     /// For known miners, updates `last_activity`.
-    pub async fn get_or_register(
-        &self,
-        payment_address: &TariAddress,
-    ) -> Result<MinerEntry, XmrigProxyError> {
+    pub async fn get_or_register(&self, payment_address: &TariAddress) -> Result<MinerEntry, XmrigProxyError> {
         let mut map = self.inner.write().await;
 
         // Check if any existing entry has the same payment address (dedup by wallet).

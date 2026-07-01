@@ -76,7 +76,8 @@ pub fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError
         .try_into()
         .map_err(|_| XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?;
 
-    let nonce_bytes: [u8; TARI_NONCE_SIZE] = blob[TARI_BLOB_RESERVED_OFFSET as usize..TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE]
+    let nonce_bytes: [u8; TARI_NONCE_SIZE] = blob
+        [TARI_BLOB_RESERVED_OFFSET as usize..TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE]
         .try_into()
         .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
     let nonce = u64::from_be_bytes(nonce_bytes);
