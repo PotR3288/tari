@@ -26,11 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use log::{info, debug};
-use tari_common_types::{
-    tari_address::TariAddress,
-    types::BlockHash,
-};
+use log::{debug, info};
+use tari_common_types::{tari_address::TariAddress, types::BlockHash};
 use tari_node_components::blocks::Block;
 use tari_transaction_components::tari_proof_of_work::PowAlgorithm;
 use tari_utilities::ByteArray;
@@ -265,7 +262,9 @@ mod tests {
         let address = TariAddress::default();
         let miner = "miner_1".to_string();
 
-        storage.store(key, block.clone(), address, miner, 1, PowAlgorithm::RandomXT).await;
+        storage
+            .store(key, block.clone(), address, miner, 1, PowAlgorithm::RandomXT)
+            .await;
 
         let retrieved = storage.get(&key).await.unwrap();
         assert_eq!(retrieved, block);
@@ -307,7 +306,14 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
 
         let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
@@ -322,7 +328,14 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         // Age the template beyond MAX_TEMPLATE_AGE
         set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
@@ -337,7 +350,14 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address, "miner_a".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                make_test_block(),
+                address,
+                "miner_a".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
 
         let added = storage.add_miner_to_template(key, "miner_b".to_string()).await;
@@ -356,10 +376,24 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key1,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key2,
+                make_test_block(),
+                address,
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
 
         // Age only key1
@@ -378,10 +412,24 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, make_test_block(), address.clone(), "m1".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                make_test_block(),
+                address.clone(),
+                "m1".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         storage
-            .store(key, make_test_block(), address, "m2".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                make_test_block(),
+                address,
+                "m2".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
 
         let entry = storage.get_entry(&key).await.unwrap();
@@ -392,8 +440,14 @@ mod tests {
     #[tokio::test]
     async fn update_chain_tip_returns_true_on_height_advance() {
         let storage = BlockTemplateStorage::new();
-        let tip1 = ChainTip { height: 10, top_hash: BlockHash::default() };
-        let tip2 = ChainTip { height: 11, top_hash: BlockHash::default() };
+        let tip1 = ChainTip {
+            height: 10,
+            top_hash: BlockHash::default(),
+        };
+        let tip2 = ChainTip {
+            height: 11,
+            top_hash: BlockHash::default(),
+        };
 
         assert!(!storage.update_chain_tip(tip1).await); // first update is always "no advance" from default
         assert!(storage.update_chain_tip(tip2).await);
@@ -402,8 +456,14 @@ mod tests {
     #[tokio::test]
     async fn update_chain_tip_returns_true_on_hash_change() {
         let storage = BlockTemplateStorage::new();
-        let tip1 = ChainTip { height: 10, top_hash: [0u8; 32].into() };
-        let tip2 = ChainTip { height: 10, top_hash: [1u8; 32].into() };
+        let tip1 = ChainTip {
+            height: 10,
+            top_hash: [0u8; 32].into(),
+        };
+        let tip2 = ChainTip {
+            height: 10,
+            top_hash: [1u8; 32].into(),
+        };
 
         storage.update_chain_tip(tip1).await;
         assert!(storage.update_chain_tip(tip2).await); // same height, different hash
@@ -412,7 +472,10 @@ mod tests {
     #[tokio::test]
     async fn update_chain_tip_returns_false_on_same_tip() {
         let storage = BlockTemplateStorage::new();
-        let tip = ChainTip { height: 10, top_hash: [42u8; 32].into() };
+        let tip = ChainTip {
+            height: 10,
+            top_hash: [42u8; 32].into(),
+        };
 
         assert!(!storage.update_chain_tip(tip).await); // first update from default
         assert!(!storage.update_chain_tip(tip).await); // same tip again
@@ -427,10 +490,24 @@ mod tests {
 
         // Store a RandomXT template and a Sha3x template
         storage
-            .store(key1, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key1,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         storage
-            .store(key2, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::Sha3x)
+            .store(
+                key2,
+                make_test_block(),
+                address,
+                "m".to_string(),
+                1,
+                PowAlgorithm::Sha3x,
+            )
             .await;
 
         assert!(storage.get(&key1).await.is_some());
@@ -439,14 +516,17 @@ mod tests {
         // Evict only RandomXT templates
         storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
 
-        assert!(storage.get(&key1).await.is_none());  // RandomXT removed
-        assert!(storage.get(&key2).await.is_some());   // Sha3x preserved
+        assert!(storage.get(&key1).await.is_none()); // RandomXT removed
+        assert!(storage.get(&key2).await.is_some()); // Sha3x preserved
     }
 
     #[tokio::test]
     async fn evict_for_algorithm_does_not_affect_chain_tip() {
         let storage = BlockTemplateStorage::new();
-        let tip = ChainTip { height: 42, top_hash: [99u8; 32].into() };
+        let tip = ChainTip {
+            height: 42,
+            top_hash: [99u8; 32].into(),
+        };
         storage.update_chain_tip(tip).await;
 
         storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
@@ -454,7 +534,10 @@ mod tests {
         // Verify the chain tip survived evict_for_algorithm by checking that a subsequent
         // update is still detected as an advance. If eviction had cleared the stored tip,
         // this call would return false (reset from default) instead of true.
-        let new_tip = ChainTip { height: 43, top_hash: [99u8; 32].into() };
+        let new_tip = ChainTip {
+            height: 43,
+            top_hash: [99u8; 32].into(),
+        };
         assert!(storage.update_chain_tip(new_tip).await);
     }
 
@@ -466,7 +549,14 @@ mod tests {
 
         // Store a RandomXT template with two miners assigned.
         storage
-            .store(key1, make_test_block(), address.clone(), "miner_a".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key1,
+                make_test_block(),
+                address.clone(),
+                "miner_a".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         let key = storage.get_for_address(&address).await.unwrap().0;
         storage.add_miner_to_template(key, "miner_b".to_string()).await;
@@ -486,7 +576,14 @@ mod tests {
 
         // Store a Sha3x template — RandomXT eviction should return empty.
         storage
-            .store(key, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::Sha3x)
+            .store(
+                key,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::Sha3x,
+            )
             .await;
 
         let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
@@ -502,10 +599,24 @@ mod tests {
 
         // Store templates for different algorithms
         storage
-            .store(key_rx, make_test_block(), address.clone(), "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key_rx,
+                make_test_block(),
+                address.clone(),
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+            )
             .await;
         storage
-            .store(key_cuckaroo, make_test_block(), address, "m".to_string(), 1, PowAlgorithm::Cuckaroo)
+            .store(
+                key_cuckaroo,
+                make_test_block(),
+                address,
+                "m".to_string(),
+                1,
+                PowAlgorithm::Cuckaroo,
+            )
             .await;
 
         // Evict RandomXT — Cuckaroo should survive

@@ -29,8 +29,7 @@ use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::TariAddress,
     types::{
-        CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
-        UncompressedPublicKey,
+        CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment, UncompressedPublicKey,
     },
 };
 use tari_core::{
@@ -50,7 +49,7 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use super::{
-    blob::{build_tari_mining_blob, parse_mining_blob, POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET},
+    blob::{POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET, build_tari_mining_blob, parse_mining_blob},
     block_template_storage::{BlockTemplateStorage, ChainTip},
     error::XmrigProxyError,
     json_rpc::{json_rpc_error, json_rpc_success},
@@ -188,9 +187,7 @@ impl InnerService {
         };
 
         // 3. Register or refresh miner by resolved payment address (dedup by wallet).
-        self.miner_registry
-            .get_or_register(&payment_address)
-            .await?;
+        self.miner_registry.get_or_register(&payment_address).await?;
 
         // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
         let mut handler = self.node_service.clone();
@@ -204,7 +201,7 @@ impl InnerService {
             // Only evict RandomXT templates when a RandomXT block advances the tip.
             // Non-RandomXT blocks don't invalidate our cached template since we only
             // mine RandomXT and its target interval (480s) is much longer than other lanes.
-            let new_block_algo = handler.get_metadata().await.ok().map(|m| m.best_block_height());
+            let new_block_algo = Some(meta.best_block_height());
             let should_evict = if let Some(height) = new_block_algo {
                 match handler.get_header(height).await {
                     Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
@@ -224,7 +221,9 @@ impl InnerService {
         let next_height = meta.best_block_height().saturating_add(1);
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
             // Add miner to the cached template (no nonce partitioning — random assignment at submit time)
-            self.block_templates.add_miner_to_template(cached_key, miner_id.clone()).await;
+            self.block_templates
+                .add_miner_to_template(cached_key, miner_id.clone())
+                .await;
 
             debug!(
                 target: LOG_TARGET,
@@ -447,7 +446,11 @@ impl InnerService {
             .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
             .hash();
 
-        let target_difficulty_val = self.block_templates.get_target_difficulty(mining_hash_key).await.unwrap_or(600);
+        let target_difficulty_val = self
+            .block_templates
+            .get_target_difficulty(mining_hash_key)
+            .await
+            .unwrap_or(600);
 
         // Generate a random min_nonce for this template (full u64 space, random start)
         let min_nonce: u64 = rand::random();
