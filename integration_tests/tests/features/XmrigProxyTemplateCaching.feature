@@ -46,3 +46,18 @@ Feature: XMRig Proxy Template Caching & Chain Tip Tracking
     When I mine 3 RandomXT blocks on NODE
     And I request a block template from NODE with miner ID "fresh_miner_b3"
     Then the response height is greater than stored value "height_before_tip"
+
+  # -----------------------------------------------------------------------
+  # Scenario B4: Non-RandomXT chain tip advance evicts stale templates
+  # Mining a Sha3x (non-RandomXT) block advances the chain tip. The proxy must
+  # detect this and evict RandomXT templates — even though the new block uses a
+  # different algorithm, the cached template's prev_hash is now stale because it
+  # points to the old tip, not the newly-arrived Sha3x block.
+  # -----------------------------------------------------------------------
+  Scenario: Non-RandomXT chain tip advance invalidates cached template
+    When I request a block template from NODE with miner ID "evict_miner_b4"
+    And I store the response prev_hash as "original_prev_hash"
+
+    When I mine 3 Sha3x blocks on NODE
+    When I request a block template from NODE with miner ID "evict_miner_b4"
+    Then the stored value "original_prev_hash" is different from current prev_hash

@@ -416,6 +416,36 @@ async fn xmrig_proxy_mine_randomxt_blocks(world: &mut TariWorld, num_blocks: u64
 }
 
 // ---------------------------------------------------------------------------
+// Sha3x block mining step (for XMRig proxy eviction tests)
+// ---------------------------------------------------------------------------
+
+/// Mine blocks using Sha3x algorithm so the proxy detects a non-RandomXT tip advance
+/// and evicts cached templates. This verifies that *any* chain tip advance — not just
+/// RandomXT advances — invalidates stale templates whose prev_hash no longer matches
+/// the current best chain.
+#[when(expr = r"I mine {int} Sha3x blocks on {word}")]
+async fn xmrig_proxy_mine_sha3x_blocks(world: &mut TariWorld, num_blocks: u64, base_node_name: String) {
+    let mut client = world
+        .get_node_client(&base_node_name)
+        .await
+        .expect("Couldn't get the node client to mine with");
+    let script_key_id = &world.script_key_id().await;
+
+    mine_blocks_with_algorithm(
+        &mut client,
+        num_blocks,
+        0, // weight (default)
+        &world.key_manager,
+        script_key_id,
+        &world.default_payment_address.clone(),
+        false,
+        &world.consensus_manager.clone(),
+        PowAlgos::Sha3x.into(),
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
 // JSON-RPC response assertions
 // ---------------------------------------------------------------------------
 

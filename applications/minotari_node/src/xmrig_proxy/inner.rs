@@ -198,24 +198,12 @@ impl InnerService {
         };
         let advanced = self.block_templates.update_chain_tip(current_tip).await;
         if advanced {
-            // Only evict RandomXT templates when a RandomXT block advances the tip.
-            // Non-RandomXT blocks don't invalidate our cached template since we only
-            // mine RandomXT and its target interval (480s) is much longer than other lanes.
-            let new_block_algo = Some(meta.best_block_height());
-            let should_evict = if let Some(height) = new_block_algo {
-                match handler.get_header(height).await {
-                    Ok(Some(header)) => header.header().pow.pow_algo == PowAlgorithm::RandomXT,
-                    _ => false,
-                }
-            } else {
-                false
-            };
-            if should_evict {
-                debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-                self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-            } else {
-                debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}) by non-RandomXT block, keeping RandomXT templates", current_tip.height, current_tip.top_hash);
-            }
+            // Evict RandomXT templates on any chain tip advance. A cached template's prev_hash
+            // points to the tip at generation time — when *any* block advances the chain, that
+            // parent hash becomes stale and miners hashing on it will submit work with an
+            // incorrect parent, wasting hashing effort until rejection triggers regeneration.
+            debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
+            self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
         }
 
         let next_height = meta.best_block_height().saturating_add(1);
