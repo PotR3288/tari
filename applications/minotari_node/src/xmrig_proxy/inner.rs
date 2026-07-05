@@ -180,7 +180,8 @@ impl InnerService {
             None => {
                 debug!(
                     target: LOG_TARGET,
-                    "No wallet address provided by miner; using config default (fallback active)"
+                    "Miner at {} provided no wallet address; using config default (fallback active)",
+                    self.peer_addr
                 );
                 self.wallet_payment_address.clone()
             },
