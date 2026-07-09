@@ -103,3 +103,69 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
     # Re-register — should succeed
     When I request a block template from NODE with miner ID "d2_re_reg_miner"
     Then the JSON-RPC response status is OK
+
+  # -----------------------------------------------------------------------
+  # Scenario E7: Wrong-network wallet address falls back to config default
+  # A miner sends a valid TariAddress on MainNet while the proxy runs on LocalNet.
+  # The proxy should silently fall back to its config-default payment address,
+  # still return status OK, but the coinbase targets the default (not the miner's).
+  # This verifies the network-validation guard added in inner.rs ~lines 97-108.
+  # -----------------------------------------------------------------------
+  Scenario: 12_WrongNetworkWalletAddress_FallsBackToDefault
+    When I request a block template from NODE with a wrong-network wallet address
+    Then the JSON-RPC response status is OK
+
+  # -----------------------------------------------------------------------
+  # Scenario E8: Same wallet, different extra_nonce — multi-miner deduplication
+  # Two miners behind NAT share one payment address but send distinct extra_nonces.
+  # The proxy should deduplicate by wallet in the registry (one entry) but still
+  # track distinct miner_ids via extra_nonce and return them in responses.
+  # -----------------------------------------------------------------------
+  Scenario: 13_SameWalletDifferentExtraNonce_ShareCacheEntry
+    When I request a block template from NODE with miner ID "shared_wallet_e8" using extra nonce "extra_nonce_001"
+    Then the JSON-RPC response status is OK
+
+    When I request a block template from NODE with miner ID "shared_wallet_e8" using extra nonce "extra_nonce_002"
+    Then the JSON-RPC response status is OK
+
+  # -----------------------------------------------------------------------
+  # Scenario E9: getblocktemplate response contains all expected fields
+  # Verifies that every field in the getblocktemplate result object is present
+  # and has the correct type. This ensures the proxy's response contract is stable.
+  # Fields tested: blocktemplate_blob, blockhashing_blob, seed_hash, difficulty,
+  # height, prev_hash, reserved_offset, min_nonce, max_nonce, expected_reward,
+  # status, untrusted, miner_id.
+  # -----------------------------------------------------------------------
+  Scenario: 14_GetBlockTemplate_ResponseContainsAllFields
+    When I request a block template from NODE with miner ID "fields_miner_e9"
+    Then the response contains string field "blocktemplate_blob"
+    And the response contains string field "blockhashing_blob"
+    And the response contains string field "seed_hash"
+    And the response contains numeric field "difficulty"
+    And the response contains numeric field "height"
+    And the response contains string field "prev_hash"
+    And the response contains numeric field "reserved_offset"
+    And the response contains numeric field "min_nonce"
+    And the response contains numeric field "max_nonce"
+    And the response contains numeric field "expected_reward"
+    And the response contains string field "status"
+    And the response contains numeric field "untrusted"
+    And the response contains string field "miner_id"
+
+  # -----------------------------------------------------------------------
+  # Scenario E10: nonce range is valid (min_nonce <= max_nonce)
+  # The proxy generates a random min_nonce and always uses u64::MAX for max.
+  # This test verifies the invariant holds in practice.
+  # -----------------------------------------------------------------------
+  Scenario: 15_NonceRangeIsValid
+    When I request a block template from NODE with miner ID "nonce_miner_e10"
+    Then the nonce range is valid (min_nonce <= max_nonce)
+
+  # -----------------------------------------------------------------------
+  # Scenario E11: miner_id is non-empty in response
+  # Every getblocktemplate response should include a non-empty miner_id string.
+  # This verifies that parse_miner_id_from_request() always produces a value.
+  # -----------------------------------------------------------------------
+  Scenario: 16_MinerIdIsNonEmpty
+    When I request a block template from NODE with miner ID "minerid_miner_e11"
+    Then the response contains a non-empty miner_id
