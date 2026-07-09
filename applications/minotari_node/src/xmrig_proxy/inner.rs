@@ -171,7 +171,8 @@ impl InnerService {
             Some(addr) => {
                 debug!(
                     target: LOG_TARGET,
-                    "Miner-provided address network '{}' does not match node network '{}'; falling back to config default (fallback active)",
+                    "Miner at {} provided address network '{}' does not match node network '{}'; falling back to config default (fallback active)",
+                    self.peer_addr,
                     addr.network(),
                     self.network
                 );
