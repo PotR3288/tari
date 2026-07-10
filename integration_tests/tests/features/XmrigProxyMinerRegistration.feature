@@ -149,7 +149,7 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
     And the response contains numeric field "max_nonce"
     And the response contains numeric field "expected_reward"
     And the response contains string field "status"
-    And the response contains numeric field "untrusted"
+    And the response contains boolean field "untrusted"
     And the response contains string field "miner_id"
 
   # -----------------------------------------------------------------------
