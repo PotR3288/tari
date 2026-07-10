@@ -23,36 +23,21 @@
 use std::net::SocketAddr;
 
 use hyper::{Response, StatusCode, body::Bytes};
-use log::{debug, info, trace, warn};
-use serde_json::{Value, json};
+use log::{debug, trace, warn};
+use serde_json::Value;
 use tari_common::configuration::Network;
-use tari_common_types::{
-    tari_address::TariAddress,
-    types::{
-        CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment, UncompressedPublicKey,
-    },
-};
+use tari_common_types::tari_address::TariAddress;
 use tari_core::{
     base_node::{LocalNodeCommsInterface, StateMachineHandle},
     consensus::BaseNodeConsensusManager,
-    validation::tari_rx_vm_key_height,
 };
-use tari_transaction_components::{
-    generate_coinbase_with_wallet_output,
-    key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface, TxoStage},
-    tari_proof_of_work::PowAlgorithm,
-    transaction_components::{
-        CoinBaseExtra, KernelBuilder, RangeProofType, TransactionKernel, TransactionKernelVersion,
-        memo_field::{MemoField, TxType},
-    },
-};
-use tari_utilities::ByteArray;
+use tari_transaction_components::tari_proof_of_work::PowAlgorithm;
+use tari_transaction_components::transaction_components::RangeProofType;
 
 use super::{
-    blob::{POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET, build_tari_mining_blob, parse_mining_blob},
-    block_template_storage::{BlockTemplateStorage, ChainTip},
+    block_template_storage::BlockTemplateStorage,
     error::XmrigProxyError,
-    json_rpc::{json_rpc_error, json_rpc_success},
+    json_rpc::json_rpc_error,
     miner_registry::MinerRegistry,
     request_parser::{parse_miner_id_from_request, parse_wallet_address_from_request},
     service::{ProxyBody, json_response},
@@ -87,10 +72,11 @@ impl InnerService {
         trace!(target: LOG_TARGET, "Received method: {method}");
         match method {
             "getblocktemplate" => self.handle_get_block_template(&json).await,
-            "submitblock" => self.handle_submit_block(&json).await,
-            "getblockcount" | "get_height" => self.handle_get_height(&json).await,
-            "getheight" => self.handle_get_height_hash().await,
-            "getinfo" => self.handle_get_info().await,
+            "submitblock" => super::submit_block::handle_submit_block(
+                &json,
+                &self.block_templates,
+                &self.node_service,
+            ).await,
             _ => {
                 debug!(target: LOG_TARGET, "Unknown method: {method}");
                 json_response(
@@ -105,59 +91,10 @@ impl InnerService {
         }
     }
 
-    /// Fetch the current chain tip height and block hash from the node.
-    async fn get_chain_tip(&self) -> Result<ChainTip, XmrigProxyError> {
-        let mut handler = self.node_service.clone();
-        let meta = handler.get_metadata().await?;
-        Ok(ChainTip {
-            height: meta.best_block_height(),
-            top_hash: *meta.best_block_hash(),
-        })
-    }
-
     /// Handle GET /get_height, /getinfo, /getheight requests (some mining software uses these).
     pub async fn handle_get(&self, path: &str) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        match path {
-            "/get_height" | "/getblockcount" => self.handle_get_height(&json!({})).await,
-            "/getheight" => self.handle_get_height_hash().await,
-            "/getinfo" | "/get_info" => self.handle_get_info().await,
-            _ => json_response(StatusCode::NOT_FOUND, &json!({"error": "Not found"})),
-        }
-    }
-
-    async fn handle_get_height(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        let tip = self.get_chain_tip().await?;
-        json_response(
-            StatusCode::OK,
-            &json_rpc_success(
-                req["id"].get("id").map(|v| v.as_i64()).unwrap_or_default(),
-                json!({ "count": tip.height, "status": "OK" }),
-            ),
-        )
-    }
-
-    async fn handle_get_height_hash(&self) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        let tip = self.get_chain_tip().await?;
-        json_response(
-            StatusCode::OK,
-            &json!({
-                "height": tip.height,
-                "hash": format!("{}", tip.top_hash),
-                "status": "OK",
-            }),
-        )
-    }
-
-    async fn handle_get_info(&self) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        let tip = self.get_chain_tip().await?;
-        json_response(
-            StatusCode::OK,
-            &json!({
-                "top_block_hash": format!("{}", tip.top_hash),
-                "height": tip.height,
-                "status": "OK",
-            }),
-        )
+        let mut handler = self.node_service.clone();
+        super::status_handlers::handle_get(path, &mut handler).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -193,22 +130,9 @@ impl InnerService {
 
         // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
         let mut handler = self.node_service.clone();
-        let meta = handler.get_metadata().await?;
-        let current_tip = ChainTip {
-            height: meta.best_block_height(),
-            top_hash: *meta.best_block_hash(),
-        };
-        let advanced = self.block_templates.update_chain_tip(current_tip).await;
-        if advanced {
-            // Evict RandomXT templates on any chain tip advance. A cached template's prev_hash
-            // points to the tip at generation time — when *any* block advances the chain, that
-            // parent hash becomes stale and miners hashing on it will submit work with an
-            // incorrect parent, wasting hashing effort until rejection triggers regeneration.
-            debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-            self.block_templates.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-        }
+        let _advanced = super::chain_tip::check_chain_tip_advance(&mut handler, &self.block_templates).await?;
+        let next_height = handler.get_metadata().await?.best_block_height().saturating_add(1);
 
-        let next_height = meta.best_block_height().saturating_add(1);
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
             // Add miner to the cached template (no nonce partitioning — random assignment at submit time)
             self.block_templates
@@ -227,16 +151,22 @@ impl InnerService {
             if self.block_templates.get(&cached_key).await.is_none() {
                 debug!(target: LOG_TARGET, "Cached template for address {} was evicted between lookup and response build, regenerating", payment_address);
             } else {
-                return self.build_template_response(&cached_key, &miner_id, req).await;
+                return super::template_builder::build_template_response(
+                    &self.node_service,
+                    &self.consensus_rules,
+                    &self.block_templates,
+                    &cached_key,
+                    &miner_id,
+                    req,
+                ).await;
             }
         }
 
-        // 4. No cached template — generate a new one
+        // 4. No cached template — build and store via pipeline
         let constants = self.consensus_rules.consensus_constants(next_height);
         let asking_weight = constants.max_block_transaction_weight();
 
-        // Get a new RandomXT block template from the local node
-        let mut new_template = handler
+        let new_template = handler
             .get_new_block_template(PowAlgorithm::RandomXT, asking_weight)
             .await
             .map_err(|e| {
@@ -244,325 +174,35 @@ impl InnerService {
                 e
             })?;
 
-        let height = new_template.header.height;
-        // Capture target_difficulty from the template before it's consumed by get_new_block
         let target_difficulty = new_template.target_difficulty.as_u64();
 
-        // Calculate the coinbase reward for this block
-        let reward = self
-            .consensus_rules
-            .calculate_coinbase_and_fees(height, new_template.body.kernels())
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
-            .as_u64();
-
-        // Validate coinbase count
-        let max_coinbases = self
-            .consensus_rules
-            .consensus_constants(height)
-            .max_block_coinbase_count();
-        if 1 > max_coinbases {
-            return Err(XmrigProxyError::InternalError(
-                "No coinbases allowed by consensus".to_string(),
-            ));
-        }
-
-        // Generate the coinbase output and kernel for the payment address
-        let coinbase_extra = CoinBaseExtra::try_from(self.coinbase_extra.clone())
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-        let key_manager = KeyManager::new_random().map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-        let script_key_id = TariKeyId::default();
-
-        let (_, coinbase_output, coinbase_kernel, wallet_output) = generate_coinbase_with_wallet_output(
-            0.into(),
-            reward.into(),
-            height,
-            &coinbase_extra,
-            &key_manager,
-            &script_key_id,
+        let result = super::template_builder::build_and_store(
+            &mut handler,
+            &self.consensus_rules,
+            &self.block_templates,
             &payment_address,
-            false, // stealth_payment
-            constants,
+            &miner_id,
+            target_difficulty,
+            new_template,
+            &self.coinbase_extra,
             self.range_proof_type,
-            MemoField::new_open(vec![], TxType::Coinbase).expect("empty user-data should always be valid"),
         )
-        .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-
-        new_template.body.add_output(coinbase_output);
-
-        // Build the kernel signature
-        let new_nonce = key_manager
-            .get_random_key(None, None)
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-        let total_nonce: UncompressedPublicKey = new_nonce
-            .pub_key
-            .to_public_key()
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-        let total_excess: UncompressedCommitment = coinbase_kernel
-            .excess
-            .to_commitment()
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-        let kernel_message = TransactionKernel::build_kernel_signature_message(
-            TransactionKernelVersion::get_current_version(),
-            coinbase_kernel.fee,
-            coinbase_kernel.lock_height,
-            &coinbase_kernel.features,
-            &None,
-        );
-        let kernel_signature = key_manager
-            .get_partial_txo_kernel_signature(
-                wallet_output.commitment_mask_key_id(),
-                &new_nonce.key_id,
-                &CompressedPublicKey::new_from_pk(total_nonce),
-                &CompressedPublicKey::new_from_pk(total_excess.as_public_key().clone()),
-                TransactionKernelVersion::get_current_version(),
-                &kernel_message,
-                &coinbase_kernel.features,
-                TxoStage::Output,
-            )
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
-            .to_schnorr_signature()
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
-
-        let kernel_new = KernelBuilder::new()
-            .with_fee(0.into())
-            .with_features(coinbase_kernel.features)
-            .with_lock_height(coinbase_kernel.lock_height)
-            .with_excess(&CompressedCommitment::from_commitment(
-                coinbase_kernel
-                    .excess
-                    .to_commitment()
-                    .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?,
-            ))
-            .with_signature(CompressedSignature::new_from_schnorr(kernel_signature))
-            .build()
-            .unwrap();
-
-        new_template.body.add_kernel(kernel_new);
-        new_template.body.sort();
-
-        // Ask the node to finalize the block (fills in MMR roots etc.)
-        let new_block = handler.get_new_block(new_template).await.map_err(|e| {
-            warn!(target: LOG_TARGET, "Failed to get new block: {e}");
-            e
-        })?;
-
-        let block_height = new_block.header.height;
-
-        // Compute the RandomXT mining hash
-        let mining_hash = match new_block.header.pow.pow_algo {
-            PowAlgorithm::RandomXT => new_block.header.mining_hash().to_vec(),
-            algo => {
-                return Err(XmrigProxyError::InternalError(format!(
-                    "Expected RandomXT block template, got {algo:?}"
-                )));
-            },
-        };
-
-        if mining_hash.len() != 32 {
-            return Err(XmrigProxyError::MissingData(format!(
-                "mining_hash has wrong length: {}",
-                mining_hash.len()
-            )));
-        }
-
-        // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
-        let vm_key_height = tari_rx_vm_key_height(block_height);
-        let _vm_key = *handler
-            .get_header(vm_key_height)
-            .await?
-            .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
-            .hash();
-
-        // Assign nonce range and store template with miner context (no partitioning — random at submit time)
-        let mining_hash_key: [u8; 32] = mining_hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| XmrigProxyError::MissingData("mining hash not 32 bytes".to_string()))?;
-
-        self.block_templates
-            .store(
-                mining_hash_key,
-                new_block,
-                payment_address.clone(),
-                miner_id.clone(),
-                target_difficulty,
-                PowAlgorithm::RandomXT,
-            )
-            .await;
+        .await?;
 
         debug!(
             target: LOG_TARGET,
-            "New template for height #{block_height}, miner {miner_id}, address {}",
-            payment_address
+            "New template for miner {miner_id}, address {}",
+            payment_address,
         );
 
         // Build response via shared helper
-        self.build_template_response(&mining_hash_key, &miner_id, req).await
-    }
-
-    /// Build the JSON-RPC response for a block template (used by both cached and fresh paths).
-    async fn build_template_response(
-        &self,
-        mining_hash_key: &[u8; 32],
-        miner_id: &str,
-        req: &Value,
-    ) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        let block = match self.block_templates.get(mining_hash_key).await {
-            Some(b) => b,
-            None => {
-                return Err(XmrigProxyError::InternalError(
-                    "Template disappeared after store".to_string(),
-                ));
-            },
-        };
-        let block_height = block.header.height;
-
-        // Re-derive mining hash from the stored block (nonce is zero at template time)
-        let mining_hash = match block.header.pow.pow_algo {
-            PowAlgorithm::RandomXT => block.header.mining_hash().to_vec(),
-            algo => {
-                return Err(XmrigProxyError::InternalError(format!(
-                    "Expected RandomXT block template, got {algo:?}"
-                )));
-            },
-        };
-
-        // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
-        let mut handler = self.node_service.clone();
-        let vm_key_height = tari_rx_vm_key_height(block_height);
-        let vm_key = *handler
-            .get_header(vm_key_height)
-            .await?
-            .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
-            .hash();
-
-        let target_difficulty_val = self
-            .block_templates
-            .get_target_difficulty(mining_hash_key)
-            .await
-            .unwrap_or(600);
-
-        // Generate a random min_nonce for this template (full u64 space, random start)
-        let min_nonce: u64 = rand::random();
-        let max_nonce: u64 = u64::MAX;
-
-        // Calculate expected reward
-        let expected_reward = self
-            .consensus_rules
-            .calculate_coinbase_and_fees(block_height, block.body.kernels())
-            .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
-            .as_u64();
-
-        // Build the 76-byte XMRig-compatible mining blob
-        let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
-        let blob_hex = hex::encode(&blob);
-        let seed_hex = hex::encode(vm_key);
-        let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
-
-        // Fetch current chain tip so the log reveals whether this template is stale.
-        let current_tip = self.get_chain_tip().await?;
-
-        debug!(
-            target: LOG_TARGET,
-            "Template response for height #{block_height} (current tip: #{}), miner {miner_id}, nonce range [{min_nonce}, {max_nonce}]",
-            current_tip.height,
-        );
-
-        json_response(
-            StatusCode::OK,
-            &json_rpc_success(
-                req.get("id").and_then(|v| v.as_i64()),
-                json!({
-                    "blocktemplate_blob": blob_hex,
-                    "blockhashing_blob": blob_hex,
-                    "seed_hash": seed_hex,
-                    "difficulty": target_difficulty_val,
-                    "height": block_height,
-                    "prev_hash": prev_hash_hex,
-                    "reserved_offset": TARI_BLOB_RESERVED_OFFSET,
-                    "min_nonce": min_nonce,
-                    "max_nonce": max_nonce,
-                    "expected_reward": expected_reward,
-                    "status": "OK",
-                    "untrusted": false,
-                    "miner_id": miner_id,
-                }),
-            ),
-        )
-    }
-
-    async fn handle_submit_block(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        let params = match req["params"].as_array() {
-            Some(p) => p,
-            None => {
-                return json_response(
-                    StatusCode::OK,
-                    &json_rpc_error(req["id"].as_i64(), -32602, "params must be an array"),
-                );
-            },
-        };
-
-        let blob_hex = match params.first().and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return json_response(
-                    StatusCode::OK,
-                    &json_rpc_error(req["id"].as_i64(), -32602, "params[0] must be a hex string"),
-                );
-            },
-        };
-
-        let blob = hex::decode(blob_hex).map_err(|e| XmrigProxyError::InvalidRequest(e.to_string()))?;
-
-        // Parse mining hash and nonce using shared parser (avoids magic numbers in callers)
-        let (mining_hash, nonce) = parse_mining_blob(&blob)?;
-
-        // Look up and remove the stored block template (prevents duplicate submissions)
-        let mut block = match self.block_templates.take(&mining_hash).await {
-            Some(b) => b,
-            None => {
-                let hash_hex = hex::encode(mining_hash);
-                warn!(
-                    target: LOG_TARGET,
-                    "No block template found for mining hash {hash_hex} - possible duplicate submission"
-                );
-                return json_response(
-                    StatusCode::OK,
-                    &json_rpc_error(req["id"].as_i64(), -1, "Block template not found or already submitted"),
-                );
-            },
-        };
-
-        // Update the nonce in the block header
-        block.header.nonce = nonce;
-
-        let block_height = block.header.height;
-        info!(target: LOG_TARGET, "Submitting block #{block_height} with nonce={nonce} to base node");
-
-        // Submit to the base node via LocalNodeCommsInterface
-        let mut handler = self.node_service.clone();
-        match handler.submit_block(block).await {
-            Ok(block_hash) => {
-                let block_hash_hex = hex::encode(block_hash);
-                info!(target: LOG_TARGET, "Block #{block_height} accepted, hash={block_hash_hex}");
-                json_response(
-                    StatusCode::OK,
-                    &json_rpc_success(
-                        req["id"].as_i64(),
-                        json!({
-                            "status": "OK",
-                            "untrusted": false,
-                        }),
-                    ),
-                )
-            },
-            Err(e) => {
-                warn!(target: LOG_TARGET, "Block #{block_height} rejected: {e}");
-                json_response(
-                    StatusCode::OK,
-                    &json_rpc_error(req["id"].as_i64(), -5, &format!("Block rejected: {e}")),
-                )
-            },
-        }
+        super::template_builder::build_template_response(
+            &self.node_service,
+            &self.consensus_rules,
+            &self.block_templates,
+            &result.mining_hash_key,
+            &miner_id,
+            req,
+        ).await
     }
 }
