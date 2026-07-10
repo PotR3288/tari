@@ -21,11 +21,18 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Builds a new block template with coinbase output, kernel signature, and stores it in the cache.
+//! Also constructs the JSON-RPC response for template queries.
 //!
 //! Three-step pipeline:
 //! 1. `build_coinbase()` — generate coinbase output + kernel for payment address, add to template
 //! 2. `sign_kernel()` — build kernel signature and add to template body
 //! 3. `finalize_and_store()` — finalize via node, compute mining hash, get VM key, store in cache
+//!
+//! Response construction:
+//! - `build_template_response()` — fetch stored block, derive mining data, return JSON-RPC response
+
+use hyper::{Response, StatusCode};
+use serde_json::{Value, json};
 
 use tari_common_types::types::{
     CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
@@ -45,12 +52,18 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use super::{
-    block_template_storage::BlockTemplateStorage,
+    block_template_storage::{BlockTemplateStorage, ChainTip},
+    blob::{POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET, build_tari_mining_blob},
     error::XmrigProxyError,
+    json_rpc::json_rpc_success,
+    service::{ProxyBody, json_response},
     MinerId,
 };
 
+const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
+
 /// Result of building and storing a new template — returned to the caller for response construction.
+#[allow(dead_code)]
 pub struct TemplateBuildResult {
     /// The 32-byte mining hash key used for cache lookup.
     pub mining_hash_key: [u8; 32],
@@ -259,5 +272,106 @@ pub async fn finalize_and_store(
     Ok(TemplateBuildResult {
         mining_hash_key,
         vm_key,
+    })
+}
+
+/// Build the JSON-RPC response for a block template (used by both cached and fresh paths).
+pub async fn build_template_response(
+    node_service: &LocalNodeCommsInterface,
+    consensus_rules: &BaseNodeConsensusManager,
+    block_templates: &BlockTemplateStorage,
+    mining_hash_key: &[u8; 32],
+    miner_id: &MinerId,
+    req: &Value,
+) -> Result<Response<ProxyBody>, XmrigProxyError> {
+    let block = match block_templates.get(mining_hash_key).await {
+        Some(b) => b,
+        None => {
+            return Err(XmrigProxyError::InternalError(
+                "Template disappeared after store".to_string(),
+            ));
+        },
+    };
+    let block_height = block.header.height;
+
+    // Re-derive mining hash from the stored block (nonce is zero at template time)
+    let mining_hash = match block.header.pow.pow_algo {
+        PowAlgorithm::RandomXT => block.header.mining_hash().to_vec(),
+        algo => {
+            return Err(XmrigProxyError::InternalError(format!(
+                "Expected RandomXT block template, got {algo:?}"
+            )));
+        },
+    };
+
+    // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
+    let mut handler = node_service.clone();
+    let vm_key_height = tari_rx_vm_key_height(block_height);
+    let vm_key = *handler
+        .get_header(vm_key_height)
+        .await?
+        .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
+        .hash();
+
+    let target_difficulty_val = block_templates
+        .get_target_difficulty(mining_hash_key)
+        .await
+        .unwrap_or(600);
+
+    // Generate a random min_nonce for this template (full u64 space, random start)
+    let min_nonce: u64 = rand::random();
+    let max_nonce: u64 = u64::MAX;
+
+    // Calculate expected reward
+    let expected_reward = consensus_rules
+        .calculate_coinbase_and_fees(block_height, block.body.kernels())
+        .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
+        .as_u64();
+
+    // Build the 76-byte XMRig-compatible mining blob
+    let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
+    let blob_hex = hex::encode(&blob);
+    let seed_hex = hex::encode(vm_key);
+    let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
+
+    // Fetch current chain tip so the log reveals whether this template is stale.
+    let current_tip = get_chain_tip(node_service).await?;
+
+    log::debug!(
+        target: LOG_TARGET,
+        "Template response for height #{block_height} (current tip: #{}), miner {miner_id}, nonce range [{min_nonce}, {max_nonce}]",
+        current_tip.height,
+    );
+
+    json_response(
+        StatusCode::OK,
+        &json_rpc_success(
+            req.get("id").and_then(|v| v.as_i64()),
+            json!({
+                "blocktemplate_blob": blob_hex,
+                "blockhashing_blob": blob_hex,
+                "seed_hash": seed_hex,
+                "difficulty": target_difficulty_val,
+                "height": block_height,
+                "prev_hash": prev_hash_hex,
+                "reserved_offset": TARI_BLOB_RESERVED_OFFSET,
+                "min_nonce": min_nonce,
+                "max_nonce": max_nonce,
+                "expected_reward": expected_reward,
+                "status": "OK",
+                "untrusted": false,
+                "miner_id": miner_id,
+            }),
+        ),
+    )
+}
+
+/// Fetch the current chain tip height and block hash from the node.
+async fn get_chain_tip(node_service: &LocalNodeCommsInterface) -> Result<ChainTip, XmrigProxyError> {
+    let mut handler = node_service.clone();
+    let meta = handler.get_metadata().await?;
+    Ok(ChainTip {
+        height: meta.best_block_height(),
+        top_hash: *meta.best_block_hash(),
     })
 }
