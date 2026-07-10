@@ -33,7 +33,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use log::debug;
 use serde_json::Value;
 use tari_common_types::tari_address::TariAddress;
 
