@@ -57,7 +57,7 @@ pub async fn check_chain_tip_advance(
     block_templates: &BlockTemplateStorage,
 ) -> Result<bool, XmrigProxyError> {
     let current_tip = get_chain_tip(handler).await?;
-    let advanced = block_templates.update_chain_tip(current_tip.clone()).await;
+    let advanced = block_templates.update_chain_tip(current_tip).await;
     if advanced {
         debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
         block_templates.evict_for_algorithm(tari_transaction_components::tari_proof_of_work::PowAlgorithm::RandomXT).await;
