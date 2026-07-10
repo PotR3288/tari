@@ -44,11 +44,6 @@ pub enum XmrigProxyError {
     #[error("Internal error: {0}")]
     InternalError(String),
 
-    #[error("Miner authentication failed: {0}")]
-    // TODO: wire into handle() for optional auth token check (config-gated)
-    #[allow(dead_code)]
-    MinerAuthError(String),
-
     #[error("Max miners reached: {0}")]
     MaxMinersReached(usize),
 }
@@ -56,7 +51,6 @@ pub enum XmrigProxyError {
 impl XmrigProxyError {
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::MinerAuthError(_) => StatusCode::UNAUTHORIZED,
             Self::MaxMinersReached(_) => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -66,12 +60,6 @@ impl XmrigProxyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn miner_auth_error_returns_unauthorized() {
-        let err = XmrigProxyError::MinerAuthError("test".into());
-        assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
-    }
 
     #[test]
     fn max_miners_reached_returns_service_unavailable() {

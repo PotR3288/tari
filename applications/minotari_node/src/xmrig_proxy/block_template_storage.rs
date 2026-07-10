@@ -23,7 +23,6 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use log::{debug, info};
@@ -36,7 +35,6 @@ use tokio::sync::RwLock;
 use super::MinerId;
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::storage";
-const MAX_TEMPLATE_AGE: Duration = Duration::from_secs(20 * 60); // 20 minutes
 
 /// Tracks the last known chain tip so we can detect when Tari's state has advanced.
 #[derive(Clone, Copy, Debug, Default)]
@@ -61,7 +59,6 @@ impl ChainTip {
 #[derive(Clone)]
 pub struct TemplateEntry {
     pub block: Block,
-    pub inserted_at: Instant,
     pub wallet_address: TariAddress,
     pub assigned_miners: HashSet<MinerId>,
     /// Difficulty from the node's block template (used for miner responses).
@@ -72,7 +69,6 @@ pub struct TemplateEntry {
 
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
 ///
-/// Templates are automatically expired after [`MAX_TEMPLATE_AGE`].
 /// Chain tip advances (new blocks found or reorgs) are tracked to detect stale caches early.
 #[derive(Clone)]
 pub struct BlockTemplateStorage {
@@ -119,7 +115,6 @@ impl BlockTemplateStorage {
             key,
             TemplateEntry {
                 block,
-                inserted_at: Instant::now(),
                 wallet_address,
                 assigned_miners: {
                     let mut set = HashSet::new();
@@ -135,14 +130,13 @@ impl BlockTemplateStorage {
 
     /// Look up a cached template by wallet address.
     ///
-    /// Returns `Some((key, TemplateEntry))` if a template for the given address exists and is still fresh
-    /// (younger than [`MAX_TEMPLATE_AGE`]). Returns `None` if no match or if the template is stale.
+    /// Returns `Some((key, TemplateEntry))` if a template for the given address exists.
+    /// Returns `None` if no match is found.
     pub async fn get_for_address(&self, wallet_address: &TariAddress) -> Option<([u8; 32], TemplateEntry)> {
         let map = self.inner.read().await;
-        let now = Instant::now();
 
         for (key, entry) in map.iter() {
-            if entry.wallet_address == *wallet_address && now.duration_since(entry.inserted_at) < MAX_TEMPLATE_AGE {
+            if entry.wallet_address == *wallet_address {
                 return Some((*key, entry.clone()));
             }
         }
@@ -213,18 +207,6 @@ impl BlockTemplateStorage {
         }
         evicted_miners
     }
-
-    /// Remove all templates older than [`MAX_TEMPLATE_AGE`].
-    pub async fn remove_outdated(&self) {
-        let now = Instant::now();
-        let mut map = self.inner.write().await;
-        let before = map.len();
-        map.retain(|_, e| now.duration_since(e.inserted_at) < MAX_TEMPLATE_AGE);
-        let removed = before.saturating_sub(map.len());
-        if removed > 0 {
-            debug!(target: LOG_TARGET, "Removed {removed} outdated templates");
-        }
-    }
 }
 
 impl Default for BlockTemplateStorage {
@@ -244,14 +226,6 @@ mod tests {
 
     fn make_test_key() -> [u8; 32] {
         [42u8; 32]
-    }
-
-    /// Helper to mutate `inserted_at` on a stored template so we can simulate age.
-    async fn set_template_age(storage: &BlockTemplateStorage, key: [u8; 32], duration: Duration) {
-        let mut map = storage.inner.write().await;
-        if let Some(entry) = map.get_mut(&key) {
-            entry.inserted_at = Instant::now() - duration;
-        }
     }
 
     #[tokio::test]
@@ -300,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_for_address_returns_fresh_template() {
+    async fn get_for_address_returns_template() {
         let storage = BlockTemplateStorage::new();
         let key = make_test_key();
         let address = TariAddress::default();
@@ -319,65 +293,6 @@ mod tests {
         let (found_key, entry) = storage.get_for_address(&address).await.unwrap();
         assert_eq!(found_key, key);
         assert_eq!(entry.wallet_address, address);
-    }
-
-    #[tokio::test]
-    async fn get_for_address_returns_none_for_stale_template() {
-        let storage = BlockTemplateStorage::new();
-        let key = make_test_key();
-        let address = TariAddress::default();
-
-        storage
-            .store(
-                key,
-                make_test_block(),
-                address.clone(),
-                "m".to_string(),
-                1,
-                PowAlgorithm::RandomXT,
-            )
-            .await;
-        // Age the template beyond MAX_TEMPLATE_AGE
-        set_template_age(&storage, key, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
-
-        assert!(storage.get_for_address(&address).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn remove_outdated_keeps_fresh_templates() {
-        let storage = BlockTemplateStorage::new();
-        let key1 = [1u8; 32];
-        let key2 = [2u8; 32];
-        let address = TariAddress::default();
-
-        storage
-            .store(
-                key1,
-                make_test_block(),
-                address.clone(),
-                "m".to_string(),
-                1,
-                PowAlgorithm::RandomXT,
-            )
-            .await;
-        storage
-            .store(
-                key2,
-                make_test_block(),
-                address,
-                "m".to_string(),
-                1,
-                PowAlgorithm::RandomXT,
-            )
-            .await;
-
-        // Age only key1
-        set_template_age(&storage, key1, MAX_TEMPLATE_AGE + Duration::from_secs(1)).await;
-
-        storage.remove_outdated().await;
-
-        assert!(storage.get(&key1).await.is_none());
-        assert!(storage.get(&key2).await.is_some());
     }
 
     #[tokio::test]
