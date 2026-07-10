@@ -38,7 +38,6 @@ pub(crate) type MinerId = String;
 
 use std::time::Duration;
 
-use futures::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use log::{error, info};
@@ -103,8 +102,7 @@ pub async fn run_xmrig_proxy(
         miner_timeout_secs,
     });
 
-    // Periodic cleanup of expired templates and stale miners
-    let cleanup_storage = block_templates.clone();
+    // Periodic cleanup of stale miners
     let cleanup_registry = miner_registry.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
@@ -112,13 +110,6 @@ pub async fn run_xmrig_proxy(
             interval.tick().await;
             // Evict stale miners from the registry.
             cleanup_registry.evict_stale().await;
-            // Remove outdated templates
-            if let Err(e) = std::panic::AssertUnwindSafe(cleanup_storage.remove_outdated())
-                .catch_unwind()
-                .await
-            {
-                error!(target: LOG_TARGET, "Template cleanup panicked: {e:?}");
-            }
         }
     });
 
