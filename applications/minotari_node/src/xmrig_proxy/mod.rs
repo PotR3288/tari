@@ -22,12 +22,16 @@
 
 mod blob;
 mod block_template_storage;
+mod chain_tip;
 mod error;
 mod inner;
 mod json_rpc;
 mod miner_registry;
 mod request_parser;
 mod service;
+mod status_handlers;
+mod submit_block;
+mod template_builder;
 
 /// Miner identity key — the `extra_nonce` hex string sent by XMRig.
 pub(crate) type MinerId = String;
