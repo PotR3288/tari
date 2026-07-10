@@ -45,7 +45,7 @@ fn get_xmrig_proxy_port(world: &TariWorld, base_node_name: &String) -> u16 {
 // Dispatches based on path to avoid ambiguity with multiple #[when] patterns.
 // ---------------------------------------------------------------------------
 
-#[when(expr = r"I call GET {string} on proxy of node {word}")]
+#[when(regex = r"I call GET (.+) on proxy of node (\w+)")]
 async fn xmrig_proxy_get_on_proxy(world: &mut TariWorld, path: String, base_node_name: String) {
     let port = get_xmrig_proxy_port(world, &base_node_name);
     world.last_xmrig_proxy_response = reqwest::get(format!("http://127.0.0.1:{port}{path}"))
@@ -513,7 +513,7 @@ fn xmrig_proxy_assert_status_ok(world: &mut TariWorld) {
 
 /// Assert that the response contains a specific dotted-path field.
 /// E.g., "nonce_range.start" checks resp.result.nonce_range.start exists.
-#[then(expr = r#"the response contains field "{string}""#)]
+#[then(regex = r#"the response contains field "([^"]+)"#)]
 fn xmrig_proxy_assert_response_contains_field(world: &mut TariWorld, path: String) {
     let parts: Vec<&str> = path.split('.').collect();
 
@@ -859,7 +859,7 @@ async fn xmrig_proxy_get_template_same_wallet_different_extra_nonce(
 
 /// Assert that the response contains a specific dotted-path field under result.
 /// E.g., "min_nonce" checks resp.result.min_nonce exists and is a number.
-#[then(expr = r#"the response contains numeric field "{string}""#)]
+#[then(regex = r#"the response contains numeric field "([^"]+)"#)]
 fn xmrig_proxy_assert_response_contains_numeric_field(world: &mut TariWorld, path: String) {
     let parts: Vec<&str> = path.split('.').collect();
 
@@ -881,7 +881,7 @@ fn xmrig_proxy_assert_response_contains_numeric_field(world: &mut TariWorld, pat
 }
 
 /// Assert that the response contains a specific dotted-path string field under result.
-#[then(expr = r#"the response contains string field "{string}""#)]
+#[then(regex = r#"the response contains string field "([^"]+)"#)]
 fn xmrig_proxy_assert_response_contains_string_field(world: &mut TariWorld, path: String) {
     let parts: Vec<&str> = path.split('.').collect();
 
@@ -897,6 +897,28 @@ fn xmrig_proxy_assert_response_contains_string_field(world: &mut TariWorld, path
     assert!(
         current.is_some_and(|v| v.as_str().is_some()),
         "Response does not contain string field '{}' or it's not a string. Full response: {}",
+        path,
+        world.last_xmrig_proxy_response
+    );
+}
+
+/// Assert that the response contains a specific dotted-path boolean field under result.
+#[then(regex = r#"the response contains boolean field "([^"]+)"#)]
+fn xmrig_proxy_assert_response_contains_boolean_field(world: &mut TariWorld, path: String) {
+    let parts: Vec<&str> = path.split('.').collect();
+
+    // Walk the JSON tree starting from result
+    let mut current = world.last_xmrig_proxy_response.get("result");
+    for part in &parts {
+        match current {
+            Some(obj) => current = obj.get(*part),
+            None => break,
+        }
+    }
+
+    assert!(
+        current.is_some_and(|v| v.is_boolean()),
+        "Response does not contain boolean field '{}' or it's not a boolean. Full response: {}",
         path,
         world.last_xmrig_proxy_response
     );
