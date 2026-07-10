@@ -91,7 +91,7 @@ impl InnerService {
         }
     }
 
-    /// Handle GET /get_height, /getinfo, /getheight requests (some mining software uses these).
+    /// Handle GET requests
     pub async fn handle_get(&self, path: &str) -> Result<Response<ProxyBody>, XmrigProxyError> {
         let mut handler = self.node_service.clone();
         super::status_handlers::handle_get(path, &mut handler).await
@@ -101,7 +101,6 @@ impl InnerService {
     async fn handle_get_block_template(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
         // 1. Parse miner identity from request (two-layer: extra_nonce > peer_addr for nonce partitioning).
         let miner_id = parse_miner_id_from_request(req, self.peer_addr);
-
         let requested_wallet_address = parse_wallet_address_from_request(req);
         let payment_address = match &requested_wallet_address {
             Some(addr) if addr.network() == self.network => requested_wallet_address.clone().unwrap(),
@@ -134,20 +133,21 @@ impl InnerService {
         let next_height = handler.get_metadata().await?.best_block_height().saturating_add(1);
 
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
-            // Add miner to the cached template (no nonce partitioning — random assignment at submit time)
+            // Add miner to the cached template (no nonce partitioning — random assignment)
             self.block_templates
                 .add_miner_to_template(cached_key, miner_id.clone())
                 .await;
 
             debug!(
                 target: LOG_TARGET,
-                "Cached template hit for miner {miner_id}, address {}",
+                "Cached template hit for miner {}, address {}",
+                miner_id,
                 payment_address
             );
 
             // Re-validate after potential eviction — a concurrent request or reorg may have evicted
-            // this template between the cache lookup above and now. If it's gone, fall through to
-            // generate a fresh one instead of returning "Template disappeared" error.
+            // this template between the cache lookup above and now. If template has been evicted, fall through to
+            // generate a fresh one instead of returning an error.
             if self.block_templates.get(&cached_key).await.is_none() {
                 debug!(target: LOG_TARGET, "Cached template for address {} was evicted between lookup and response build, regenerating", payment_address);
             } else {
@@ -191,7 +191,8 @@ impl InnerService {
 
         debug!(
             target: LOG_TARGET,
-            "New template for miner {miner_id}, address {}",
+            "New template for miner {}, address {}",
+            miner_id,
             payment_address,
         );
 

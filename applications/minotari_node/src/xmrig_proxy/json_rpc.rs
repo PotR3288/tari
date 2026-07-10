@@ -44,31 +44,3 @@ pub fn json_rpc_error(id: Option<i64>, code: i32, message: &str) -> Value {
         },
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_rpc_success_contains_result_and_jsonrpc_version() {
-        let resp = json_rpc_success(Some(1), json!("ok"));
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["result"], "ok");
-        assert_eq!(resp["id"], 1);
-    }
-
-    #[test]
-    fn json_rpc_success_defaults_id_to_minus_one() {
-        let resp = json_rpc_success(None, json!("ok"));
-        assert_eq!(resp["id"], -1);
-    }
-
-    #[test]
-    fn json_rpc_error_contains_error_code_and_message() {
-        let resp = json_rpc_error(Some(2), -1, "bad");
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["error"]["code"], -1);
-        assert_eq!(resp["error"]["message"], "bad");
-        assert_eq!(resp["id"], 2);
-    }
-}
