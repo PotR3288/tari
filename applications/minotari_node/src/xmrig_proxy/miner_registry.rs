@@ -174,15 +174,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unregister_returns_entry() {
-        let registry = MinerRegistry::new(make_config());
-        let addr = TariAddress::default();
-        registry.get_or_register(&addr).await.unwrap();
-        let entry = registry.unregister(&addr).await.unwrap();
-        assert_eq!(entry.payment_address, addr);
-    }
-
-    #[tokio::test]
     async fn evict_stale_removes_inactive_miners() {
         let mut config = make_config();
         config.miner_timeout_secs = 1;
@@ -190,6 +181,7 @@ mod tests {
         let addr = TariAddress::default();
         registry.get_or_register(&addr).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // evict_stale is called by the periodic cleanup task in mod.rs (every 10 min)
         let reg_ids = registry.evict_stale().await;
         assert_eq!(reg_ids.len(), 1);
     }

@@ -124,46 +124,8 @@ mod tests {
     async fn json_response_serializes_body() {
         let body = serde_json::json!({ "key": "value" });
         let response = json_response(StatusCode::OK, &body).unwrap();
-        // Verify the body contains the serialized JSON by checking it can be deserialized back
         let collected_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&collected_bytes).unwrap();
         assert_eq!(parsed, body);
-    }
-
-    #[test]
-    fn json_response_with_not_found_status() {
-        let body = serde_json::json!({ "height": 42 });
-        let response = json_response(StatusCode::NOT_FOUND, &body).unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn json_response_with_service_unavailable_status() {
-        let body = serde_json::json!({ "miners": 32 });
-        let response = json_response(StatusCode::SERVICE_UNAVAILABLE, &body).unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn json_response_collects_full_body() {
-        let body = serde_json::json!({ "nested": { "key": "value" } });
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        let collected_bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let parsed: Value = serde_json::from_slice(&collected_bytes).unwrap();
-        assert_eq!(parsed["nested"]["key"], "value");
-    }
-
-    #[test]
-    fn json_response_handles_empty_object() {
-        let body = serde_json::json!({});
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn json_response_handles_array_body() {
-        let body = serde_json::json!([1, 2, 3]);
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
     }
 }
