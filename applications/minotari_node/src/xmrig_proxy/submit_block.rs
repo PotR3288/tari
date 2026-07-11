@@ -26,8 +26,8 @@
 //! corresponding cached template (removing it to prevent duplicate submissions), patches
 //! the nonce in the block header, and submits to the base node.
 
-use log::{info, warn};
 use hyper::{Response, StatusCode};
+use log::{info, warn};
 use serde_json::{Value, json};
 use tari_core::base_node::LocalNodeCommsInterface;
 
