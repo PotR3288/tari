@@ -122,13 +122,14 @@ impl InnerService {
             },
         };
 
-        // 3. Register or refresh miner by resolved payment address (dedup by wallet).
+        // 2. Register or refresh miner by resolved payment address (dedup by wallet).
         self.miner_registry.get_or_register(&payment_address).await?;
 
-        // 3b. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
+        // 3. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
         let mut handler = self.node_service.clone();
-        let _advanced = super::chain_tip::check_chain_tip_advance(&mut handler, &self.block_templates).await?;
-        let next_height = handler.get_metadata().await?.best_block_height().saturating_add(1);
+        let (_advanced, current_tip_height) =
+            super::chain_tip::check_chain_tip_advance(&mut handler, &self.block_templates).await?;
+        let next_height = current_tip_height.saturating_add(1);
 
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
             // Add miner to the cached template (no nonce partitioning — random assignment)

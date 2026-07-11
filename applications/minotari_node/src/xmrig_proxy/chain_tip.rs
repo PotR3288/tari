@@ -49,11 +49,14 @@ pub async fn get_chain_tip(handler: &mut LocalNodeCommsInterface) -> Result<Chai
 
 /// Check whether the chain has advanced and evict stale templates if so.
 ///
-/// Returns `true` if a tip advance was detected (templates were evicted).
+/// Returns `true` if a tip advance was detected (templates were evicted), along with
+/// the current chain tip height for use by callers who need it (e.g., computing the next
+/// block height). This avoids a redundant metadata fetch — the caller can reuse the
+/// height instead of calling `get_metadata()` again.
 pub async fn check_chain_tip_advance(
     handler: &mut LocalNodeCommsInterface,
     block_templates: &BlockTemplateStorage,
-) -> Result<bool, XmrigProxyError> {
+) -> Result<(bool, u64), XmrigProxyError> {
     let current_tip = get_chain_tip(handler).await?;
     let advanced = block_templates.update_chain_tip(current_tip).await;
     if advanced {
@@ -62,5 +65,5 @@ pub async fn check_chain_tip_advance(
             .evict_for_algorithm(tari_transaction_components::tari_proof_of_work::PowAlgorithm::RandomXT)
             .await;
     }
-    Ok(advanced)
+    Ok((advanced, current_tip.height))
 }
