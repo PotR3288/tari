@@ -65,6 +65,8 @@ pub struct TemplateEntry {
     pub target_difficulty: u64,
     /// PoW algorithm used to generate this template.
     pub pow_algo: PowAlgorithm,
+    /// RandomX VM key (seed hash) — computed once during template build and reused for all responses from this cache entry.
+    pub vm_key: [u8; 32],
 }
 
 /// Thread-safe in-memory store for block templates, keyed by the 32-byte mining hash.
@@ -108,6 +110,7 @@ impl BlockTemplateStorage {
         miner_id: MinerId,
         target_difficulty: u64,
         pow_algo: PowAlgorithm,
+        vm_key: [u8; 32],
     ) {
         info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
         let mut map = self.inner.write().await;
@@ -123,6 +126,7 @@ impl BlockTemplateStorage {
                 },
                 target_difficulty,
                 pow_algo,
+                vm_key,
             },
         );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
@@ -237,7 +241,15 @@ mod tests {
         let miner = "miner_1".to_string();
 
         storage
-            .store(key, block.clone(), address, miner, 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                block.clone(),
+                address,
+                miner,
+                1,
+                PowAlgorithm::RandomXT,
+                make_test_key(),
+            )
             .await;
 
         let retrieved = storage.get(&key).await.unwrap();
@@ -259,7 +271,15 @@ mod tests {
         let address = TariAddress::default();
 
         storage
-            .store(key, block.clone(), address, "m".to_string(), 1, PowAlgorithm::RandomXT)
+            .store(
+                key,
+                block.clone(),
+                address,
+                "m".to_string(),
+                1,
+                PowAlgorithm::RandomXT,
+                make_test_key(),
+            )
             .await;
 
         let taken = storage.take(&key).await.unwrap();
@@ -287,6 +307,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::RandomXT,
+                make_test_key(),
             )
             .await;
 
@@ -309,6 +330,7 @@ mod tests {
                 "m1".to_string(),
                 1,
                 PowAlgorithm::RandomXT,
+                make_test_key(),
             )
             .await;
         storage
@@ -319,6 +341,7 @@ mod tests {
                 "m2".to_string(),
                 1,
                 PowAlgorithm::RandomXT,
+                make_test_key(),
             )
             .await;
 
@@ -389,6 +412,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::RandomXT,
+                make_test_key(),
             )
             .await;
         storage
@@ -399,6 +423,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::Sha3x,
+                make_test_key(),
             )
             .await;
 
@@ -448,6 +473,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::Sha3x,
+                make_test_key(),
             )
             .await;
 
@@ -471,6 +497,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::RandomXT,
+                make_test_key(),
             )
             .await;
         storage
@@ -481,6 +508,7 @@ mod tests {
                 "m".to_string(),
                 1,
                 PowAlgorithm::Cuckaroo,
+                make_test_key(),
             )
             .await;
 

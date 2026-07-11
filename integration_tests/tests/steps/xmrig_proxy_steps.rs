@@ -96,10 +96,10 @@ async fn xmrig_proxy_get_on_proxy(world: &mut TariWorld, path: String, base_node
                     "XMRig getinfo height {height} does not match node height {best_height}"
                 );
             }
-        }
+        },
         _ => {
             // Unknown path — response already stored (used by 404 tests).
-        }
+        },
     }
 }
 
