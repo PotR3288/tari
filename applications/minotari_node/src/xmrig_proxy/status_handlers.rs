@@ -29,10 +29,7 @@ use hyper::{Response, StatusCode};
 use serde_json::{Value, json};
 use tari_core::base_node::LocalNodeCommsInterface;
 
-use super::{
-    error::XmrigProxyError,
-    service::ProxyBody,
-};
+use super::{error::XmrigProxyError, service::ProxyBody};
 
 /// Handle GET /get_height, /getinfo, /getheight requests (some mining software uses these).
 pub async fn handle_get(
@@ -48,7 +45,10 @@ pub async fn handle_get(
 }
 
 /// Handle GET /get_height and /getblockcount — returns block count.
-async fn get_height(req: &Value, handler: &mut LocalNodeCommsInterface) -> Result<Response<ProxyBody>, XmrigProxyError> {
+async fn get_height(
+    req: &Value,
+    handler: &mut LocalNodeCommsInterface,
+) -> Result<Response<ProxyBody>, XmrigProxyError> {
     let tip = super::chain_tip::get_chain_tip(handler).await?;
     super::service::json_response(
         StatusCode::OK,

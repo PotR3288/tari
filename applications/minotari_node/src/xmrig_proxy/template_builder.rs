@@ -35,10 +35,11 @@ use hyper::{Response, StatusCode};
 use serde_json::{Value, json};
 
 use tari_common_types::types::{
-    CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment,
-    UncompressedPublicKey,
+    CompressedCommitment, CompressedPublicKey, CompressedSignature, UncompressedCommitment, UncompressedPublicKey,
 };
-use tari_core::{base_node::LocalNodeCommsInterface, consensus::BaseNodeConsensusManager, validation::tari_rx_vm_key_height};
+use tari_core::{
+    base_node::LocalNodeCommsInterface, consensus::BaseNodeConsensusManager, validation::tari_rx_vm_key_height,
+};
 use tari_node_components::blocks::NewBlockTemplate;
 use tari_transaction_components::{
     generate_coinbase_with_wallet_output,
@@ -52,12 +53,12 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use super::{
-    block_template_storage::{BlockTemplateStorage, ChainTip},
+    MinerId,
     blob::{POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET, build_tari_mining_blob},
+    block_template_storage::{BlockTemplateStorage, ChainTip},
     error::XmrigProxyError,
     json_rpc::json_rpc_success,
     service::{ProxyBody, json_response},
-    MinerId,
 };
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
@@ -86,14 +87,33 @@ pub async fn build_and_store(
     let height = new_template.header.height;
 
     // Step 1: Build coinbase output + kernel and add to template.
-    let (coinbase_kernel, mut key_manager, wallet_commitment_mask_key_id) =
-        build_coinbase(consensus_rules, payment_address, coinbase_extra, range_proof_type, height, &mut new_template)?;
+    let (coinbase_kernel, mut key_manager, wallet_commitment_mask_key_id) = build_coinbase(
+        consensus_rules,
+        payment_address,
+        coinbase_extra,
+        range_proof_type,
+        height,
+        &mut new_template,
+    )?;
 
     // Step 2: Sign the kernel and add to template body.
-    sign_kernel(&mut new_template, &coinbase_kernel, &mut key_manager, wallet_commitment_mask_key_id)?;
+    sign_kernel(
+        &mut new_template,
+        &coinbase_kernel,
+        &mut key_manager,
+        wallet_commitment_mask_key_id,
+    )?;
 
     // Step 3: Finalize via node, compute mining hash, get VM key, store in cache.
-    finalize_and_store(handler, block_templates, payment_address, miner_id, target_difficulty, new_template).await
+    finalize_and_store(
+        handler,
+        block_templates,
+        payment_address,
+        miner_id,
+        target_difficulty,
+        new_template,
+    )
+    .await
 }
 
 /// Build the coinbase output and kernel for a payment address, add it to the template body,
@@ -117,13 +137,14 @@ pub fn build_coinbase(
     }
 
     // Generate the coinbase output and kernel for the payment address.
-    let coinbase_extra = CoinBaseExtra::try_from(coinbase_extra.to_vec())
-        .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
+    let coinbase_extra =
+        CoinBaseExtra::try_from(coinbase_extra.to_vec()).map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
     let key_manager = KeyManager::new_random().map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
     let script_key_id = TariKeyId::default();
 
     // Calculate the coinbase reward for this block.
-    let reward = consensus_rules.calculate_coinbase_and_fees(height, new_template.body.kernels())
+    let reward = consensus_rules
+        .calculate_coinbase_and_fees(height, new_template.body.kernels())
         .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
         .as_u64();
 
@@ -145,7 +166,11 @@ pub fn build_coinbase(
     // Add coinbase output to the template body.
     new_template.body.add_output(coinbase_output);
 
-    Ok((coinbase_kernel, key_manager, wallet_output.commitment_mask_key_id().clone()))
+    Ok((
+        coinbase_kernel,
+        key_manager,
+        wallet_output.commitment_mask_key_id().clone(),
+    ))
 }
 
 /// Build the kernel signature and add it to the template body.
@@ -266,6 +291,7 @@ pub async fn finalize_and_store(
             miner_id.clone(),
             target_difficulty,
             PowAlgorithm::RandomXT,
+            vm_key,
         )
         .await;
 
@@ -284,34 +310,28 @@ pub async fn build_template_response(
     miner_id: &MinerId,
     req: &Value,
 ) -> Result<Response<ProxyBody>, XmrigProxyError> {
-    let block = match block_templates.get(mining_hash_key).await {
-        Some(b) => b,
+    let entry = match block_templates.get_entry(mining_hash_key).await {
+        Some(e) => e,
         None => {
             return Err(XmrigProxyError::InternalError(
                 "Template disappeared after store".to_string(),
             ));
         },
     };
-    let block_height = block.header.height;
+
+    // Use the vm_key stored alongside the template — avoids re-fetching from node.
+    let vm_key = entry.vm_key;
+    let block_height = entry.block.header.height;
 
     // Re-derive mining hash from the stored block (nonce is zero at template time)
-    let mining_hash = match block.header.pow.pow_algo {
-        PowAlgorithm::RandomXT => block.header.mining_hash().to_vec(),
+    let mining_hash = match entry.block.header.pow.pow_algo {
+        PowAlgorithm::RandomXT => entry.block.header.mining_hash().to_vec(),
         algo => {
             return Err(XmrigProxyError::InternalError(format!(
                 "Expected RandomXT block template, got {algo:?}"
             )));
         },
     };
-
-    // Get the RandomX VM key (seed hash for XMRig) from the block at tari_rx_vm_key_height
-    let mut handler = node_service.clone();
-    let vm_key_height = tari_rx_vm_key_height(block_height);
-    let vm_key = *handler
-        .get_header(vm_key_height)
-        .await?
-        .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?
-        .hash();
 
     let target_difficulty_val = block_templates
         .get_target_difficulty(mining_hash_key)
@@ -324,7 +344,7 @@ pub async fn build_template_response(
 
     // Calculate expected reward
     let expected_reward = consensus_rules
-        .calculate_coinbase_and_fees(block_height, block.body.kernels())
+        .calculate_coinbase_and_fees(block_height, entry.block.body.kernels())
         .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
         .as_u64();
 
@@ -332,7 +352,7 @@ pub async fn build_template_response(
     let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
     let blob_hex = hex::encode(&blob);
     let seed_hex = hex::encode(vm_key);
-    let prev_hash_hex = hex::encode(block.header.prev_hash.to_vec());
+    let prev_hash_hex = hex::encode(entry.block.header.prev_hash.to_vec());
 
     // Fetch current chain tip so the log reveals whether this template is stale.
     let current_tip = get_chain_tip(node_service).await?;

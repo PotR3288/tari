@@ -72,11 +72,9 @@ impl InnerService {
         trace!(target: LOG_TARGET, "Received method: {method}");
         match method {
             "getblocktemplate" => self.handle_get_block_template(&json).await,
-            "submitblock" => super::submit_block::handle_submit_block(
-                &json,
-                &self.block_templates,
-                &self.node_service,
-            ).await,
+            "submitblock" => {
+                super::submit_block::handle_submit_block(&json, &self.block_templates, &self.node_service).await
+            },
             _ => {
                 debug!(target: LOG_TARGET, "Unknown method: {method}");
                 json_response(
@@ -158,7 +156,8 @@ impl InnerService {
                     &cached_key,
                     &miner_id,
                     req,
-                ).await;
+                )
+                .await;
             }
         }
 
@@ -204,6 +203,7 @@ impl InnerService {
             &result.mining_hash_key,
             &miner_id,
             req,
-        ).await
+        )
+        .await
     }
 }

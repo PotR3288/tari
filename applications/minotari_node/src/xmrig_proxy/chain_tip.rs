@@ -39,9 +39,7 @@ use super::{
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
 
 /// Fetch the current chain tip height and block hash from the node service.
-pub async fn get_chain_tip(
-    handler: &mut LocalNodeCommsInterface,
-) -> Result<ChainTip, XmrigProxyError> {
+pub async fn get_chain_tip(handler: &mut LocalNodeCommsInterface) -> Result<ChainTip, XmrigProxyError> {
     let meta = handler.get_metadata().await?;
     Ok(ChainTip {
         height: meta.best_block_height(),
@@ -60,7 +58,9 @@ pub async fn check_chain_tip_advance(
     let advanced = block_templates.update_chain_tip(current_tip).await;
     if advanced {
         debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-        block_templates.evict_for_algorithm(tari_transaction_components::tari_proof_of_work::PowAlgorithm::RandomXT).await;
+        block_templates
+            .evict_for_algorithm(tari_transaction_components::tari_proof_of_work::PowAlgorithm::RandomXT)
+            .await;
     }
     Ok(advanced)
 }
