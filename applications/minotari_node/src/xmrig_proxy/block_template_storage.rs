@@ -77,6 +77,9 @@ pub struct BlockTemplateStorage {
     inner: Arc<RwLock<HashMap<[u8; 32], TemplateEntry>>>,
     /// Last known chain tip — updated whenever we fetch a fresh template from Tari.
     last_known_tip: Arc<RwLock<ChainTip>>,
+    /// Secondary index: wallet address (as string) → set of mining hashes for templates stored under that address.
+    /// Enables O(1) lookup instead of scanning all entries.
+    wallet_index: Arc<RwLock<HashMap<String, HashSet<[u8; 32]>>>>,
 }
 
 impl BlockTemplateStorage {
@@ -84,6 +87,7 @@ impl BlockTemplateStorage {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             last_known_tip: Arc::new(RwLock::new(ChainTip::default())),
+            wallet_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -113,12 +117,25 @@ impl BlockTemplateStorage {
         vm_key: [u8; 32],
     ) {
         info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
+
+        // Remove old entry from wallet_index if replacing an existing key.
         let mut map = self.inner.write().await;
+        if let Some(old_entry) = map.get(&key) {
+            let mut index = self.wallet_index.write().await;
+            let old_addr = old_entry.wallet_address.to_string();
+            if let Some(hashes) = index.get_mut(&old_addr) {
+                hashes.remove(&key);
+                if hashes.is_empty() {
+                    index.remove(&old_addr);
+                }
+            }
+        }
+
         map.insert(
             key,
             TemplateEntry {
                 block,
-                wallet_address,
+                wallet_address: wallet_address.clone(),
                 assigned_miners: {
                     let mut set = HashSet::new();
                     set.insert(miner_id.clone());
@@ -129,22 +146,26 @@ impl BlockTemplateStorage {
                 vm_key,
             },
         );
+
+        // Add to wallet_index.
+        let mut index = self.wallet_index.write().await;
+        let addr_str = wallet_address.to_string();
+        index.entry(addr_str).or_default().insert(key);
+
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
     }
 
-    /// Look up a cached template by wallet address.
+    /// Look up a cached template by wallet address using the secondary index.
     ///
     /// Returns `Some((key, TemplateEntry))` if a template for the given address exists.
     /// Returns `None` if no match is found.
     pub async fn get_for_address(&self, wallet_address: &TariAddress) -> Option<([u8; 32], TemplateEntry)> {
-        let map = self.inner.read().await;
+        let addr_str = wallet_address.to_string();
+        let index = self.wallet_index.read().await;
+        let key = *index.get(&addr_str)?.iter().next()?;
 
-        for (key, entry) in map.iter() {
-            if entry.wallet_address == *wallet_address {
-                return Some((*key, entry.clone()));
-            }
-        }
-        None
+        let map = self.inner.read().await;
+        map.get(&key).map(|entry| (key, entry.clone()))
     }
 
     /// Add a new miner to an existing template entry (template caching hit).
@@ -184,7 +205,20 @@ impl BlockTemplateStorage {
     /// Retrieve and remove a block template by its mining hash key.
     pub async fn take(&self, key: &[u8; 32]) -> Option<Block> {
         let mut map = self.inner.write().await;
-        map.remove(key).map(|e| e.block)
+        if let Some(entry) = map.remove(key) {
+            // Remove from wallet_index.
+            let mut index = self.wallet_index.write().await;
+            let addr = entry.wallet_address.to_string();
+            if let Some(hashes) = index.get_mut(&addr) {
+                hashes.remove(key);
+                if hashes.is_empty() {
+                    index.remove(&addr);
+                }
+            }
+            Some(entry.block)
+        } else {
+            None
+        }
     }
 
     /// Evict cached templates for a specific PoW algorithm. Called when Tari's chain tip advances
@@ -209,6 +243,17 @@ impl BlockTemplateStorage {
         if removed > 0 {
             debug!(target: LOG_TARGET, "Evicted {} cached templates for algorithm {:?} (chain tip advanced)", removed, algo);
         }
+
+        // Rebuild wallet_index from the remaining map entries.
+        let mut index = self.wallet_index.write().await;
+        *index = HashMap::from_iter(map.iter().map(|(key, entry)| {
+            (entry.wallet_address.to_string(), {
+                let mut set = HashSet::new();
+                set.insert(*key);
+                set
+            })
+        }));
+
         evicted_miners
     }
 }
