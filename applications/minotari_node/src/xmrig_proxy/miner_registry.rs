@@ -105,15 +105,6 @@ impl MinerRegistry {
         Ok(entry_clone)
     }
 
-    /// Remove a miner and return its entry (for nonce range reclamation).
-    // TODO: call on miner disconnect for clean cleanup
-    #[allow(dead_code)]
-    pub async fn unregister(&self, payment_address: &TariAddress) -> Option<MinerEntry> {
-        let mut map = self.inner.write().await;
-        let key = payment_address.to_string();
-        map.remove(&key)
-    }
-
     /// Remove all miners inactive for longer than `config.miner_timeout_secs`.
     pub async fn evict_stale(&self) -> Vec<MinerId> {
         let mut map = self.inner.write().await;
@@ -138,6 +129,11 @@ impl MinerRegistry {
     #[allow(dead_code)]
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    /// Look up a stored entry by its key (payment address string).
+    pub async fn get_entry(&self, key: &str) -> Option<MinerEntry> {
+        self.inner.read().await.get(key).cloned()
     }
 }
 
@@ -184,5 +180,35 @@ mod tests {
         // evict_stale is called by the periodic cleanup task in mod.rs (every 10 min)
         let reg_ids = registry.evict_stale().await;
         assert_eq!(reg_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn len_returns_current_miner_count() {
+        use tari_common_types::tari_address::TARI_ADDRESS_INTERNAL_SINGLE_SIZE;
+
+        let registry = MinerRegistry::new(make_config());
+        assert_eq!(registry.len().await, 0);
+
+        // Create two distinct addresses by setting different network bytes.
+        fn make_addr(network_byte: u8) -> TariAddress {
+            use tari_common_types::dammsum::compute_checksum;
+            let mut buf = [0u8; TARI_ADDRESS_INTERNAL_SINGLE_SIZE];
+            buf[0] = network_byte; // set network byte
+            buf[34] = compute_checksum(&buf[0..34]);
+            TariAddress::from_bytes(&buf).expect("valid address bytes")
+        }
+
+        let addr1 = make_addr(0x10); // LocalNet network byte
+        let addr2 = make_addr(0x24); // Igor network byte → distinct address
+
+        registry.get_or_register(&addr1).await.unwrap();
+        assert_eq!(registry.len().await, 1);
+
+        registry.get_or_register(&addr2).await.unwrap();
+        assert_eq!(registry.len().await, 2);
+
+        // Registering the same address again should not increase count.
+        registry.get_or_register(&addr1).await.unwrap();
+        assert_eq!(registry.len().await, 2);
     }
 }

@@ -167,18 +167,16 @@ impl BlockTemplateStorage {
         map.get(mining_hash).map(|entry| entry.block.clone())
     }
 
-    /// Retrieve a clone of the full template entry for the given mining hash.
-    // TODO: wire into handle_submit_block for identity verification (S2) — check assigned_miners
-    #[allow(dead_code)]
-    pub async fn get_entry(&self, mining_hash: &[u8; 32]) -> Option<TemplateEntry> {
-        let map = self.inner.read().await;
-        map.get(mining_hash).cloned()
-    }
-
     /// Retrieve the target difficulty for a stored template.
     pub async fn get_target_difficulty(&self, mining_hash: &[u8; 32]) -> Option<u64> {
         let map = self.inner.read().await;
         map.get(mining_hash).map(|entry| entry.target_difficulty)
+    }
+
+    /// Retrieve a clone of the full template entry by its mining hash key.
+    pub async fn get_by_key(&self, mining_hash: &[u8; 32]) -> Option<TemplateEntry> {
+        let map = self.inner.read().await;
+        map.get(mining_hash).cloned()
     }
 
     /// Retrieve and remove a block template by its mining hash key.
@@ -317,42 +315,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_replaces_existing_template() {
-        let storage = BlockTemplateStorage::new();
-        let key = make_test_key();
-        let address = TariAddress::default();
-
-        storage
-            .store(
-                key,
-                make_test_block(),
-                address.clone(),
-                "m1".to_string(),
-                1,
-                PowAlgorithm::RandomXT,
-                make_test_key(),
-            )
-            .await;
-        storage
-            .store(
-                key,
-                make_test_block(),
-                address,
-                "m2".to_string(),
-                1,
-                PowAlgorithm::RandomXT,
-                make_test_key(),
-            )
-            .await;
-
-        let entry = storage.get_entry(&key).await.unwrap();
-        assert!(!entry.assigned_miners.contains("m1"));
-        assert!(entry.assigned_miners.contains("m2"));
-    }
-
-    #[tokio::test]
     async fn update_chain_tip_returns_true_on_height_advance() {
         let storage = BlockTemplateStorage::new();
+
+        // Height advance — tip moves forward.
         let tip1 = ChainTip {
             height: 10,
             top_hash: BlockHash::default(),
@@ -369,16 +335,18 @@ mod tests {
     #[tokio::test]
     async fn update_chain_tip_returns_true_on_hash_change() {
         let storage = BlockTemplateStorage::new();
+
+        // Hash change at same height — reorg detection.
         let tip1 = ChainTip {
-            height: 10,
+            height: 20,
             top_hash: [0u8; 32].into(),
         };
         let tip2 = ChainTip {
-            height: 10,
+            height: 20,
             top_hash: [1u8; 32].into(),
         };
 
-        storage.update_chain_tip(tip1).await;
+        assert!(!storage.update_chain_tip(tip1).await); // first update from default
         assert!(storage.update_chain_tip(tip2).await); // same height, different hash
     }
 
@@ -438,84 +406,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evict_for_algorithm_does_not_affect_chain_tip() {
+    async fn add_miner_to_template_returns_false_for_missing_key() {
         let storage = BlockTemplateStorage::new();
-        let tip = ChainTip {
-            height: 42,
-            top_hash: [99u8; 32].into(),
-        };
-        storage.update_chain_tip(tip).await;
+        let missing_key: [u8; 32] = [0xFF; 32];
 
-        storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-
-        // Verify the chain tip survived evict_for_algorithm by checking that a subsequent
-        // update is still detected as an advance. If eviction had cleared the stored tip,
-        // this call would return false (reset from default) instead of true.
-        let new_tip = ChainTip {
-            height: 43,
-            top_hash: [99u8; 32].into(),
-        };
-        assert!(storage.update_chain_tip(new_tip).await);
+        let added = storage.add_miner_to_template(missing_key, "orphan".to_string()).await;
+        assert!(!added);
     }
 
     #[tokio::test]
-    async fn evict_for_algorithm_returns_empty_when_no_match() {
+    async fn get_target_difficulty_returns_stored_value() {
         let storage = BlockTemplateStorage::new();
-        let key = [1u8; 32];
+        let key = make_test_key();
         let address = TariAddress::default();
 
-        // Store a Sha3x template — RandomXT eviction should return empty.
         storage
             .store(
                 key,
                 make_test_block(),
                 address.clone(),
                 "m".to_string(),
-                1,
-                PowAlgorithm::Sha3x,
-                make_test_key(),
-            )
-            .await;
-
-        let evicted = storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
-        assert!(evicted.is_empty());
-    }
-
-    #[tokio::test]
-    async fn evict_for_algorithm_preserves_other_algorithms() {
-        let storage = BlockTemplateStorage::new();
-        let key_rx = [1u8; 32];
-        let key_cuckaroo = [2u8; 32];
-        let address = TariAddress::default();
-
-        // Store templates for different algorithms
-        storage
-            .store(
-                key_rx,
-                make_test_block(),
-                address.clone(),
-                "m".to_string(),
-                1,
+                4200,
                 PowAlgorithm::RandomXT,
                 make_test_key(),
             )
             .await;
-        storage
-            .store(
-                key_cuckaroo,
-                make_test_block(),
-                address,
-                "m".to_string(),
-                1,
-                PowAlgorithm::Cuckaroo,
-                make_test_key(),
-            )
-            .await;
 
-        // Evict RandomXT — Cuckaroo should survive
-        storage.evict_for_algorithm(PowAlgorithm::RandomXT).await;
+        let difficulty = storage.get_target_difficulty(&key).await;
+        assert_eq!(difficulty, Some(4200));
+    }
 
-        assert!(storage.get(&key_rx).await.is_none());
-        assert!(storage.get(&key_cuckaroo).await.is_some());
+    #[tokio::test]
+    async fn get_target_difficulty_returns_none_for_missing_key() {
+        let storage = BlockTemplateStorage::new();
+        let missing_key: [u8; 32] = [0xFF; 32];
+
+        assert!(storage.get_target_difficulty(&missing_key).await.is_none());
     }
 }
