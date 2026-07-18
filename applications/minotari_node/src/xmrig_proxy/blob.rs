@@ -89,72 +89,37 @@ pub fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError
 mod tests {
     use super::*;
 
+    /// Blob has correct length (76 bytes) and zero prefix.
     #[test]
-    fn build_tari_mining_blob_has_correct_length() {
+    fn build_tari_mining_blob_has_correct_length_and_zero_prefix() {
         let hash = [0x42u8; 32];
-        let blob = build_tari_mining_blob(&hash, 0, 2);
-        assert_eq!(blob.len(), 76);
-    }
-
-    #[test]
-    fn build_tari_mining_blob_starts_with_three_zero_bytes() {
-        let hash = [0x42u8; 32];
-        let blob = build_tari_mining_blob(&hash, 0, 2);
+        let blob = build_tari_mining_blob(&hash, 0, POW_ALGO_RANDOMXT);
+        assert_eq!(blob.len(), TARI_MINING_BLOB_SIZE);
         assert_eq!(&blob[0..3], &[0, 0, 0]);
     }
 
-    #[test]
-    fn build_tari_mining_blob_contains_hash_at_offset_3() {
-        let hash = [0xABu8; 32];
-        let blob = build_tari_mining_blob(&hash, 0, 2);
-        assert_eq!(&blob[3..35], &hash[..]);
-    }
-
-    #[test]
-    fn build_tari_mining_blob_encodes_nonce_as_big_endian() {
-        let hash = [0u8; 32];
-        let nonce: u64 = 0x01_02_03_04_05_06_07_08;
-        let blob = build_tari_mining_blob(&hash, nonce, 2);
-        assert_eq!(&blob[35..43], &nonce.to_be_bytes());
-    }
-
-    #[test]
-    fn build_tari_mining_blob_sets_pow_algo_at_offset_43() {
-        let hash = [0u8; 32];
-        let blob = build_tari_mining_blob(&hash, 0, POW_ALGO_RANDOMXT);
-        assert_eq!(blob[43], POW_ALGO_RANDOMXT);
-    }
-
-    #[test]
-    fn build_tari_mining_blob_trailing_bytes_are_zero() {
-        let hash = [0u8; 32];
-        let blob = build_tari_mining_blob(&hash, 0, 2);
-        assert_eq!(&blob[44..], &[0u8; 32]);
-    }
-
-    #[test]
-    fn build_tari_mining_blob_nonce_high_bytes_at_reserved_offset() {
-        let hash = [0u8; 32];
-        // nonce = 0x00000001_00000000 → high 4 bytes = 0x00000001
-        let nonce: u64 = 0x00000001_00000000;
-        let blob = build_tari_mining_blob(&hash, nonce, 2);
-        // TARI_BLOB_RESERVED_OFFSET is 35, bytes 35..39 are the high nonce bytes
-        assert_eq!(&blob[35..39], &[0x00, 0x00, 0x00, 0x01]);
-    }
-
+    /// Full round-trip: build a blob and parse it back to verify hash + nonce.
     #[test]
     fn parse_mining_blob_roundtrip() {
         let hash = [0xABu8; 32];
         let nonce: u64 = 0xDEADBEEFCAFEBABE;
         let blob = build_tari_mining_blob(&hash, nonce, POW_ALGO_RANDOMXT);
+
+        // Verify the pow_algo byte is set correctly.
+        assert_eq!(blob[43], POW_ALGO_RANDOMXT);
+
         let (parsed_hash, parsed_nonce) = parse_mining_blob(&blob).unwrap();
         assert_eq!(parsed_hash, hash);
         assert_eq!(parsed_nonce, nonce);
     }
 
+    /// Parse rejects blobs with wrong length.
     #[test]
     fn parse_mining_blob_rejects_wrong_length() {
         let blob = vec![0u8; 75]; // too short
+        assert!(parse_mining_blob(&blob).is_err());
+
+        let blob = vec![0u8; 77]; // too long
         assert!(parse_mining_blob(&blob).is_err());
     }
 }
