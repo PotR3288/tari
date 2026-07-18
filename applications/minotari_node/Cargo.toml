@@ -116,3 +116,7 @@ serde_json = "1.0.108"
 tempfile = "3.1.0"
 # `test-util` enables tokio's paused clock, used to test the GetBlocks send timeout without real waits
 tokio = { workspace = true, features = ["test-util"] }
+=======
+primitive-types = { version = "0.12", features = ["serde"] }
+tari_crypto = { workspace = true }
+
