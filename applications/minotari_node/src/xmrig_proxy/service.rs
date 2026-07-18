@@ -106,26 +106,34 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
 mod tests {
     use super::*;
 
-    #[test]
-    fn json_response_sets_status_code() {
-        let body = serde_json::json!({ "key": "value" });
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn json_response_sets_content_type_header() {
-        let body = serde_json::json!({ "key": "value" });
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        assert_eq!(response.headers().get("Content-Type").unwrap(), "application/json");
-    }
-
+    /// json_response creates a valid JSON HTTP response with correct status and content-type.
     #[tokio::test]
-    async fn json_response_serializes_body() {
-        let body = serde_json::json!({ "key": "value" });
-        let response = json_response(StatusCode::OK, &body).unwrap();
-        let collected_bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let parsed: Value = serde_json::from_slice(&collected_bytes).unwrap();
-        assert_eq!(parsed, body);
+    async fn json_response_has_correct_status_and_content_type() {
+        let body = serde_json::json!({"status": "OK"});
+        let resp = json_response(StatusCode::OK, &body).unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("Content-Type").unwrap(), "application/json");
+
+        // Body is valid JSON matching the input.
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(parsed["status"], "OK");
+    }
+
+    /// json_response preserves nested structures in the response body.
+    #[tokio::test]
+    async fn json_response_preserves_nested_body() {
+        let body = serde_json::json!({
+            "result": {"height": 123, "hash": "abc"},
+            "id": 42
+        });
+        let resp = json_response(StatusCode::ACCEPTED, &body).unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(parsed["result"]["height"], 123);
+        assert_eq!(parsed["id"], 42);
     }
 }

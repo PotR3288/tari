@@ -208,3 +208,459 @@ impl InnerService {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use primitive_types::U512;
+    use serde_json::json;
+    use tari_common::configuration::Network;
+    use tari_common_types::{chain_metadata::ChainMetadata, types::FixedHash};
+    use tari_core::{
+        base_node::{
+            LocalNodeCommsInterface,
+            comms_interface::{BlockEvent, CommsInterfaceError, NodeCommsRequest, NodeCommsResponse},
+            state_machine_service::StateMachineHandle,
+        },
+        consensus::BaseNodeConsensusManager,
+    };
+    use tari_node_components::blocks::NewBlockTemplate;
+    use tari_service_framework::reply_channel::{self, Receiver};
+    use tari_transaction_components::{MicroMinotari, aggregated_body::AggregateBody, tari_proof_of_work::Difficulty};
+    use tokio::{sync::broadcast, task};
+
+    use super::*;
+    use crate::xmrig_proxy::{
+        block_template_storage::BlockTemplateStorage,
+        miner_registry::{MinerRegistry, MinerRegistryConfig},
+    };
+
+    // ---------------------------------------------------------------------------
+    // Fixtures & helpers
+    // ---------------------------------------------------------------------------
+
+    /// Create a TariAddress for a specific network by building valid address bytes
+    /// with all-zero public key bytes and recomputing the checksum.
+    fn make_address_for_network(network: Network) -> TariAddress {
+        use tari_common_types::tari_address::TARI_ADDRESS_INTERNAL_SINGLE_SIZE;
+
+        let mut buf = [0u8; TARI_ADDRESS_INTERNAL_SINGLE_SIZE];
+        // Set network byte
+        buf[0] = network as u8;
+        // Features byte (index 1) stays 0 (no special features)
+        // Public key bytes (indices 2..34) stay all zeros - valid compressed ristretto point
+        // Compute checksum over first 34 bytes
+        use tari_common_types::dammsum::compute_checksum;
+        buf[34] = compute_checksum(&buf[0..34]);
+
+        TariAddress::from_bytes(&buf).expect("valid address bytes")
+    }
+
+    /// Build a minimal ChainMetadata fixture.
+    fn make_chain_metadata(height: u64, hash: [u8; 32]) -> ChainMetadata {
+        ChainMetadata::new(
+            height,
+            FixedHash::new(hash),
+            0, // pruning_horizon (archival)
+            0, // pruned_height
+            U512::from(1u64),
+            0,
+        )
+        .expect("valid metadata")
+    }
+
+    /// Build a minimal NewBlockTemplate fixture.
+    fn make_new_block_template() -> NewBlockTemplate {
+        NewBlockTemplate {
+            header: tari_node_components::blocks::NewBlockHeaderTemplate::empty(),
+            body: AggregateBody::empty(),
+            target_difficulty: Difficulty::from_u64(1).unwrap(),
+            reward: MicroMinotari::from(0u64),
+            total_fees: MicroMinotari::from(0u64),
+            is_mempool_in_sync: true,
+        }
+    }
+
+    /// Build a LocalNodeCommsInterface backed by reply channels. Returns the
+    /// interface and the receiver side for dispatching canned responses.
+    fn make_mock_comms() -> (
+        LocalNodeCommsInterface,
+        Receiver<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>,
+    ) {
+        let (req_tx, req_rx) =
+            reply_channel::unbounded::<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>();
+        let (block_tx, _block_rx) =
+            reply_channel::unbounded::<tari_node_components::blocks::Block, Result<FixedHash, CommsInterfaceError>>();
+        let block_event_tx: broadcast::Sender<Arc<BlockEvent>> = broadcast::channel(50).0;
+        (LocalNodeCommsInterface::new(req_tx, block_tx, block_event_tx), req_rx)
+    }
+
+    /// Build a minimal StateMachineHandle for tests. Each call creates fresh channels.
+    fn make_state_machine() -> StateMachineHandle {
+        let shutdown = tari_shutdown::Shutdown::new();
+        let state_tx: broadcast::Sender<Arc<tari_core::base_node::state_machine_service::states::StateEvent>> =
+            broadcast::channel(10).0;
+        let status_rx: tokio::sync::watch::Receiver<tari_core::base_node::state_machine_service::states::StatusInfo> =
+            tokio::sync::watch::channel(tari_core::base_node::state_machine_service::states::StatusInfo::default()).1;
+        StateMachineHandle::new(state_tx, status_rx, shutdown.to_signal())
+    }
+
+    // ---------------------------------------------------------------------------
+    // handle_get_block_template() — network mismatch & max miners (with mock)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_get_block_template_network_mismatch_falls_back_to_default() {
+        // When a miner provides a wallet address on the wrong network, the proxy
+        // should fall back to its configured default payment address.
+        let miner_addr = make_address_for_network(Network::LocalNet); // miner sends LocalNet addr
+        let config_wallet = make_address_for_network(Network::MainNet); // proxy is MainNet
+
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        // Spawn mock handler task
+        let metadata = make_chain_metadata(100, [1u8; 32]);
+        let template = make_new_block_template();
+        task::spawn(async move {
+            if let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        req_ctx
+                            .reply(Ok(NodeCommsResponse::ChainMetadata(metadata.clone())))
+                            .ok();
+                    },
+                    NodeCommsRequest::GetNewBlockTemplate(_) => {
+                        req_ctx
+                            .reply(Ok(NodeCommsResponse::NewBlockTemplate(template.clone())))
+                            .ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: config_wallet.clone(),
+            network: Network::MainNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        // Miner sends a LocalNet address while proxy is MainNet → should fall back
+        let base58 = miner_addr.to_base58();
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": { "wallet_address": base58 },
+                "id": 1,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body).await;
+        // The handler will eventually fail because the mock comms only handles
+        // GetChainMetadata and GetNewBlockTemplate but not all paths. However,
+        // we can verify that it did NOT return a network-mismatch error — instead
+        // it should have fallen back to config_wallet and proceeded past the
+        // network check. The error (if any) should be from downstream comms calls.
+        match result {
+            Err(XmrigProxyError::CommsError(_)) => {
+                // This is expected — the mock comms handler may not respond in time
+                // or may not handle all request types. The important thing is that
+                // we got past the network mismatch check (no panic, no wrong-network error).
+            },
+            Err(_e) => {
+                // Any other error is also acceptable — it means we got past network validation
+            },
+            Ok(_) => {
+                // Also acceptable if mock responded correctly
+            },
+        }
+
+        // Verify the miner was registered with the config wallet (MainNet), not the miner's address (LocalNet).
+        assert_eq!(miner_registry.len().await, 1);
+        let entry = miner_registry.get_entry(&config_wallet.to_string()).await;
+        assert!(
+            entry.is_some(),
+            "registry should contain config_wallet ({})",
+            config_wallet
+        );
+        // The stored payment_address must match the fallback, not what the miner sent.
+        assert_eq!(entry.unwrap().payment_address, config_wallet);
+    }
+
+    #[tokio::test]
+    async fn handle_get_block_template_max_miners_rejected() {
+        // When max miners is reached and the miner is new, return MaxMinersReached error.
+        let addr = TariAddress::default();
+        let base58 = addr.to_base58();
+
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        // Set max_miners to 0 — any new miner should be rejected.
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 0,
+            miner_timeout_secs: 300,
+        });
+
+        task::spawn(async move {
+            if let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: addr.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": { "wallet_address": base58 },
+                "id": 1,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body).await;
+        assert!(result.is_err());
+        // The error should be MaxMinersReached (which maps to SERVICE_UNAVAILABLE)
+        match result.unwrap_err() {
+            XmrigProxyError::MaxMinersReached(n) => {
+                assert_eq!(n, 0);
+            },
+            other => panic!("Expected MaxMinersReached error, got: {:?}", other),
+        }
+
+        // Registry should still be empty (miner was rejected before registration)
+        assert_eq!(miner_registry.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_get_block_template_known_miner_refreshes_activity() {
+        // When a known miner re-requests, their last_activity should be refreshed.
+        let addr = TariAddress::default();
+        let base58 = addr.to_base58();
+
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        task::spawn(async move {
+            if let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: addr.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        // First request — registers the miner
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": { "wallet_address": base58 },
+                "id": 1,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body.clone()).await;
+        // May fail at comms layer (mock doesn't handle GetNewBlockTemplate), but miner should be registered.
+        assert_eq!(miner_registry.len().await, 1);
+
+        // Second request — should refresh activity and find existing entry
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _result2 = service.handle(body).await;
+        // Should still have only 1 miner (dedup by wallet address)
+        assert_eq!(miner_registry.len().await, 1);
+
+        // Both requests should have been processed (may fail at comms layer but not at registry level)
+        match result {
+            Err(XmrigProxyError::MaxMinersReached(_)) => panic!("Should not hit max miners for known miner"),
+            _ => {},
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_block_template_no_wallet_address_uses_config_default() {
+        // When a miner sends no wallet address, the proxy should use its config default.
+        let config_wallet = make_address_for_network(Network::LocalNet);
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        task::spawn(async move {
+            if let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: config_wallet.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        // Request with NO wallet_address param
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": {},
+                "id": 3,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body).await;
+        // Should have used config default and registered the miner
+        assert_eq!(miner_registry.len().await, 1);
+
+        match result {
+            Err(XmrigProxyError::MaxMinersReached(_)) => panic!("Should not hit max miners"),
+            _ => {}, // Expected: may fail at comms layer but should have proceeded past wallet resolution
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_block_template_comms_error_propagates_to_caller() {
+        // When get_new_block_template fails (e.g. node unavailable), the error must be
+        // propagated to the caller rather than swallowed or causing a panic.
+        let addr = TariAddress::default();
+        let base58 = addr.to_base58();
+
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        // Mock handler responds to GetChainMetadata but returns an error for GetNewBlockTemplate.
+        task::spawn(async move {
+            while let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    NodeCommsRequest::GetNewBlockTemplate(_) => {
+                        req_ctx.reply(Err(CommsInterfaceError::UnexpectedApiResponse)).ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: addr.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": { "wallet_address": base58 },
+                "id": 99,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body).await;
+        // The error should be a CommsError propagated from the node comms interface.
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            XmrigProxyError::CommsError(_) => {}, // Expected
+            other => panic!("Expected CommsError, got: {:?}", other),
+        }
+
+        // Miner should still be registered (registration happens before the comms call).
+        assert_eq!(miner_registry.len().await, 1);
+    }
+}
