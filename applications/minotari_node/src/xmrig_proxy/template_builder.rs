@@ -53,9 +53,10 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use super::{
+    chain_tip,
     MinerId,
     blob::{POW_ALGO_RANDOMXT, TARI_BLOB_RESERVED_OFFSET, build_tari_mining_blob},
-    block_template_storage::{BlockTemplateStorage, ChainTip},
+    block_template_storage::BlockTemplateStorage,
     error::XmrigProxyError,
     json_rpc::json_rpc_success,
     service::{ProxyBody, json_response},
@@ -68,8 +69,6 @@ const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
 pub struct TemplateBuildResult {
     /// The 32-byte mining hash key used for cache lookup.
     pub mining_hash_key: [u8; 32],
-    /// The RandomX VM key (seed hash) for XMRig.
-    pub vm_key: [u8; 32],
 }
 
 /// Convenience function that chains build_coinbase → sign_kernel → finalize_and_store.
@@ -355,7 +354,8 @@ pub async fn build_template_response(
     let prev_hash_hex = hex::encode(entry.block.header.prev_hash.to_vec());
 
     // Fetch current chain tip so the log reveals whether this template is stale.
-    let current_tip = get_chain_tip(node_service).await?;
+    let mut handler = node_service.clone();
+    let current_tip = chain_tip::get_chain_tip(&mut handler).await?;
 
     log::debug!(
         target: LOG_TARGET,
@@ -384,16 +384,6 @@ pub async fn build_template_response(
             }),
         ),
     )
-}
-
-/// Fetch the current chain tip height and block hash from the node.
-async fn get_chain_tip(node_service: &LocalNodeCommsInterface) -> Result<ChainTip, XmrigProxyError> {
-    let mut handler = node_service.clone();
-    let meta = handler.get_metadata().await?;
-    Ok(ChainTip {
-        height: meta.best_block_height(),
-        top_hash: *meta.best_block_hash(),
-    })
 }
 
 #[cfg(test)]
