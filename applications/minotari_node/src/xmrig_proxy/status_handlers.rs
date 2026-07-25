@@ -53,7 +53,7 @@ async fn get_height(
     super::service::json_response(
         StatusCode::OK,
         &super::json_rpc::json_rpc_success(
-            req["id"].get("id").map(|v| v.as_i64()).unwrap_or_default(),
+            Some(req.get("id").and_then(Value::as_i64).unwrap_or(-1)),
             json!({ "count": tip.height, "status": "OK" }),
         ),
     )
