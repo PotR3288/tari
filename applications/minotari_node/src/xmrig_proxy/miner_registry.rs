@@ -130,11 +130,6 @@ impl MinerRegistry {
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
-
-    /// Look up a stored entry by its key (payment address string).
-    pub async fn get_entry(&self, key: &str) -> Option<MinerEntry> {
-        self.inner.read().await.get(key).cloned()
-    }
 }
 
 #[cfg(test)]
