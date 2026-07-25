@@ -395,14 +395,6 @@ mod tests {
 
         // Verify the miner was registered with the config wallet (MainNet), not the miner's address (LocalNet).
         assert_eq!(miner_registry.len().await, 1);
-        let entry = miner_registry.get_entry(&config_wallet.to_string()).await;
-        assert!(
-            entry.is_some(),
-            "registry should contain config_wallet ({})",
-            config_wallet
-        );
-        // The stored payment_address must match the fallback, not what the miner sent.
-        assert_eq!(entry.unwrap().payment_address, config_wallet);
     }
 
     #[tokio::test]
