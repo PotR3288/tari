@@ -296,7 +296,6 @@ pub async fn finalize_and_store(
 
     Ok(TemplateBuildResult {
         mining_hash_key,
-        vm_key,
     })
 }
 
