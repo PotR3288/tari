@@ -252,4 +252,201 @@ mod tests {
 
         assert_eq!(parsed["result"]["status"], "OK");
     }
+
+    // ---------------------------------------------------------------------------
+    // Path dispatch tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn unknown_path_returns_404() {
+        let (comms, _rx) = make_mock_comms();
+
+        let result = handle_get("/unknown_path", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(parsed["error"], "Not found");
+    }
+
+    // ---------------------------------------------------------------------------
+    // get_height / getblockcount tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_height_returns_correct_count() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 9999, 0x99));
+
+        let result = handle_get("/get_height", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(parsed["result"]["count"], 9999);
+    }
+
+    #[tokio::test]
+    async fn getblockcount_returns_correct_count() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 7777, 0x77));
+
+        let result = handle_get("/getblockcount", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(parsed["result"]["count"], 7777);
+    }
+
+    // ---------------------------------------------------------------------------
+    // getheight tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn getheight_returns_height_and_hash() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 3333, 0x33));
+
+        let result = handle_get("/getheight", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(parsed["height"], 3333);
+        assert_eq!(
+            parsed["hash"],
+            "3333333333333333333333333333333333333333333333333333333333333333"
+        );
+        assert_eq!(parsed["status"], "OK");
+    }
+
+    // ---------------------------------------------------------------------------
+    // getinfo tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn getinfo_returns_top_block_hash_and_height() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 4444, 0x44));
+
+        let result = handle_get("/getinfo", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(
+            parsed["top_block_hash"],
+            "4444444444444444444444444444444444444444444444444444444444444444"
+        );
+        assert_eq!(parsed["height"], 4444);
+        assert_eq!(parsed["status"], "OK");
+    }
+
+    #[tokio::test]
+    async fn get_info_returns_top_block_hash_and_height() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 5555, 0x55));
+
+        let result = handle_get("/get_info", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(
+            parsed["top_block_hash"],
+            "5555555555555555555555555555555555555555555555555555555555555555"
+        );
+        assert_eq!(parsed["height"], 5555);
+        assert_eq!(parsed["status"], "OK");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Chain tip error handling tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_height_propagates_comms_error() {
+        let (comms, mut rx) = make_mock_comms();
+        tokio::task::spawn(async move {
+            if let Some(req_ctx) = rx.next().await {
+                let _ = req_ctx.reply(Err(CommsInterfaceError::UnexpectedApiResponse));
+            }
+        });
+
+        let result = handle_get("/get_height", &mut comms.clone()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn getinfo_propagates_comms_error() {
+        let (comms, mut rx) = make_mock_comms();
+        tokio::task::spawn(async move {
+            if let Some(req_ctx) = rx.next().await {
+                let _ = req_ctx.reply(Err(CommsInterfaceError::UnexpectedApiResponse));
+            }
+        });
+
+        let result = handle_get("/getinfo", &mut comms.clone()).await;
+        assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Response structure validation tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_height_response_has_json_rpc_structure() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 100, 0x66));
+
+        let result = handle_get("/get_height", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Verify JSON-RPC structure
+        assert!(parsed.is_object());
+        assert_eq!(parsed.get("jsonrpc"), Some(&Value::String("2.0".to_string())));
+        assert_eq!(parsed["result"]["count"], 100);
+    }
+
+    #[tokio::test]
+    async fn getinfo_response_has_correct_fields() {
+        let (comms, rx) = make_mock_comms();
+        tokio::task::spawn(dispatch_mock_requests(rx, 200, 0x77));
+
+        let result = handle_get("/getinfo", &mut comms.clone()).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Verify all expected fields are present
+        assert!(parsed.get("top_block_hash").is_some());
+        assert!(parsed.get("height").is_some());
+        assert!(parsed.get("status").is_some());
+
+        // Verify types
+        assert!(parsed["top_block_hash"].is_string());
+        assert!(parsed["height"].is_number());
+        assert!(parsed["status"].is_string());
+    }
 }

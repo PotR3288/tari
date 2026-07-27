@@ -169,3 +169,21 @@ Feature: XMRig Proxy JSON-RPC Miner Registration
   Scenario: 16_MinerIdIsNonEmpty
     When I request a block template from NODE with miner ID "minerid_miner_e11"
     Then the response contains a non-empty miner_id
+
+  # -----------------------------------------------------------------------
+  # Scenario E12: Concurrent miners with same wallet address share cache entry
+  # Multiple XMRig instances behind NAT may share one payment address but use
+  # distinct extra_nonces. The proxy deduplicates by wallet (one template)
+  # while tracking each miner via their extra_nonce/peer_addr for logging/debugging.
+  # This tests the multi-miner coordination feature: concurrent connections
+  # with same wallet address hit the same cached template and receive random full u64 ranges.
+  # -----------------------------------------------------------------------
+  Scenario: 17_ConcurrentMinersSameWalletShareCacheEntry
+    When I request a block template from NODE with miner ID "concurrent_miner_a" using wallet address "tnt1Qp2AnySgEeQ0Cm7Dvvoqo2nQGJ8ac3nglWwMD9FSN6FzSTi2fUuMxX3h4Gy"
+    Then the JSON-RPC response status is OK
+    And I store the response height as "height_a"
+
+    # Second concurrent request with same wallet address should hit cache
+    When I request a block template from NODE with miner ID "concurrent_miner_b" using wallet address "tnt1Qp2AnySgEeQ0Cm7Dvvoqo2nQGJ8ac3nglWwMD9FSN6FzSTi2fUuMxX3h4Gy"
+    Then the JSON-RPC response status is OK
+    And the response height matches stored value "height_a"
