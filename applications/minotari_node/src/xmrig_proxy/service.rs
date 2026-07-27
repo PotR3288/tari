@@ -84,6 +84,13 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
                 Ok(response) => response,
                 Err(e) => {
                     error!(target: LOG_TARGET, "Handler error: {e}");
+
+                    // Map error variants to appropriate JSON-RPC codes
+                    let json_error_code = match &e {
+                        XmrigProxyError::InvalidRequest(_) | XmrigProxyError::MissingData(_) => -32602, // Invalid params / Invalid request
+                        _ => -32603, // Internal error (includes CommsError, MaxMinersReached)
+                    };
+
                     Response::builder()
                         .status(e.status_code())
                         .header("Content-Type", "application/json")
@@ -91,7 +98,7 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
                             serde_json::to_vec(&serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": -1,
-                                "error": {"code": -32603, "message": e.to_string()},
+                                "error": {"code": json_error_code, "message": e.to_string()},
                             }))
                             .unwrap_or_default(),
                         )))

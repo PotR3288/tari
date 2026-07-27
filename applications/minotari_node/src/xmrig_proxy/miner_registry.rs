@@ -206,4 +206,125 @@ mod tests {
         registry.get_or_register(&addr1).await.unwrap();
         assert_eq!(registry.len().await, 2);
     }
+
+    #[tokio::test]
+    async fn concurrent_miners_at_max_miners_cap() {
+        // Multiple concurrent miners hitting the max_miners cap simultaneously
+        let mut config = make_config();
+        config.max_miners = 3;
+        let registry = MinerRegistry::new(config);
+
+        fn make_addr(network_byte: u8) -> TariAddress {
+            use tari_common_types::dammsum::compute_checksum;
+            use tari_common_types::tari_address::TARI_ADDRESS_INTERNAL_SINGLE_SIZE;
+
+            let mut buf = [0u8; TARI_ADDRESS_INTERNAL_SINGLE_SIZE];
+            buf[0] = network_byte;
+            buf[34] = compute_checksum(&buf[0..34]);
+            TariAddress::from_bytes(&buf).expect("valid address bytes")
+        }
+
+        // Register 3 miners (max capacity) - use valid network bytes
+        let addr1 = make_addr(0x10); // LocalNet
+        let addr2 = make_addr(0x01); // StageNet  
+        let addr3 = make_addr(0x00); // MainNet
+
+        registry.get_or_register(&addr1).await.unwrap();
+        registry.get_or_register(&addr2).await.unwrap();
+        registry.get_or_register(&addr3).await.unwrap();
+
+        assert_eq!(registry.len().await, 3);
+
+        // Try to register a 4th miner - should fail with MaxMinersReached
+        let addr4 = make_addr(0x26); // Esmeralda (valid)
+        let result = registry.get_or_register(&addr4).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            XmrigProxyError::MaxMinersReached(n) => assert_eq!(n, 3),
+            other => panic!("Expected MaxMinersReached, got: {:?}", other),
+        }
+
+        // Registry should still have exactly 3 miners
+        assert_eq!(registry.len().await, 3);
+    }
+
+    #[tokio::test]
+    async fn eviction_timing_edge_cases() {
+        // Test edge cases around eviction timing
+
+        let mut config = make_config();
+        config.miner_timeout_secs = 1;
+        let registry = MinerRegistry::new(config);
+
+        let addr1 = TariAddress::default();
+
+        // Register miner
+        registry.get_or_register(&addr1).await.unwrap();
+        assert_eq!(registry.len().await, 1);
+
+        // Immediately check - should not be evicted (within timeout)
+        let reg_ids = registry.evict_stale().await;
+        assert_eq!(reg_ids.len(), 0);
+        assert_eq!(registry.len().await, 1);
+
+        // Wait for eviction
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Eviction should remove the stale miner
+        let reg_ids = registry.evict_stale().await;
+        assert_eq!(reg_ids.len(), 1);
+        assert_eq!(registry.len().await, 0);
+
+        // Re-register immediately after eviction - should succeed
+        registry.get_or_register(&addr1).await.unwrap();
+        assert_eq!(registry.len().await, 1);
+
+        // Register anotherminer with different address
+        fn make_addr(network_byte: u8) -> TariAddress {
+            use tari_common_types::dammsum::compute_checksum;
+            use tari_common_types::tari_address::TARI_ADDRESS_INTERNAL_SINGLE_SIZE;
+
+            let mut buf = [0u8; TARI_ADDRESS_INTERNAL_SINGLE_SIZE];
+            buf[0] = network_byte;
+            buf[34] = compute_checksum(&buf[0..34]);
+            TariAddress::from_bytes(&buf).expect("valid address bytes")
+        }
+
+        let addr2 = make_addr(0x10); // Different address
+        registry.get_or_register(&addr2).await.unwrap();
+        assert_eq!(registry.len().await, 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_miner_registration_same_address() {
+        // Multiple concurrent requests to register the same address should deduplicate
+        let registry = MinerRegistry::new(make_config());
+        let addr = TariAddress::default();
+
+        // Spawn multiple concurrent registrations for the same address
+        let handle1 = {
+            let reg = registry.clone();
+            let add = addr.clone();
+            tokio::spawn(async move { reg.get_or_register(&add).await })
+        };
+        let handle2 = {
+            let reg = registry.clone();
+            let add = addr.clone();
+            tokio::spawn(async move { reg.get_or_register(&add).await })
+        };
+        let handle3 = {
+            let reg = registry.clone();
+            let add = addr.clone();
+            tokio::spawn(async move { reg.get_or_register(&add).await })
+        };
+
+        // All should succeed (may fail at comms layer, but registry should dedupe)
+        let _r1 = handle1.await.unwrap();
+        let _r2 = handle2.await.unwrap();
+        let _r3 = handle3.await.unwrap();
+
+        // Should only have 1 entry despite 3 concurrent registrations
+        assert_eq!(registry.len().await, 1);
+    }
 }

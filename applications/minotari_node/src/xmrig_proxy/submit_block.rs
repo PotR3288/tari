@@ -31,6 +31,8 @@ use log::{info, warn};
 use serde_json::{Value, json};
 use tari_core::base_node::LocalNodeCommsInterface;
 
+// Test helpers use PowAlgorithm locally - not imported at module level
+
 use super::{
     blob::parse_mining_blob,
     error::XmrigProxyError,
@@ -138,11 +140,12 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use tari_transaction_components::tari_proof_of_work::{PowAlgorithm, ProofOfWork};
+
     use crate::xmrig_proxy::{
         blob::{POW_ALGO_RANDOMXT, build_tari_mining_blob},
         block_template_storage::BlockTemplateStorage,
     };
-    use tari_transaction_components::tari_proof_of_work::{PowAlgorithm, ProofOfWork};
 
     // ---------------------------------------------------------------------------
     // Fixtures & helpers
@@ -201,7 +204,6 @@ mod tests {
                 TariAddress::default(),
                 "test-miner".to_string(),
                 100,
-                PowAlgorithm::RandomXT,
                 [0x42u8; 32],
             )
             .await;
@@ -399,7 +401,6 @@ mod tests {
                 TariAddress::default(),
                 "test-miner".to_string(),
                 100,
-                PowAlgorithm::RandomXT,
                 [0x42u8; 32],
             )
             .await;
