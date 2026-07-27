@@ -72,17 +72,28 @@ pub fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError
         )));
     }
 
-    let mining_hash: [u8; 32] = blob[TARI_HASH_OFFSET..TARI_BLOB_RESERVED_OFFSET as usize]
+    // Validate mining hash bytes (first 32 bytes after 3-byte prefix)
+    let mining_hash_bytes: [u8; 32] = blob[TARI_HASH_OFFSET..TARI_BLOB_RESERVED_OFFSET as usize]
         .try_into()
         .map_err(|_| XmrigProxyError::InvalidRequest("bad mining hash slice".to_string()))?;
 
+    // Validate nonce bytes
     let nonce_bytes: [u8; TARI_NONCE_SIZE] = blob
         [TARI_BLOB_RESERVED_OFFSET as usize..TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE]
         .try_into()
         .map_err(|_| XmrigProxyError::InvalidRequest("bad nonce slice".to_string()))?;
+
     let nonce = u64::from_be_bytes(nonce_bytes);
 
-    Ok((mining_hash, nonce))
+    // Validate pow_algo byte is within expected range
+    let pow_algo_byte = blob[TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE];
+    if pow_algo_byte != POW_ALGO_RANDOMXT {
+        return Err(XmrigProxyError::InvalidRequest(format!(
+            "invalid pow_algo byte: {pow_algo_byte} (expected {POW_ALGO_RANDOMXT} for RandomXT)"
+        )));
+    }
+
+    Ok((mining_hash_bytes, nonce))
 }
 
 #[cfg(test)]
@@ -120,6 +131,18 @@ mod tests {
         assert!(parse_mining_blob(&blob).is_err());
 
         let blob = vec![0u8; 77]; // too long
+        assert!(parse_mining_blob(&blob).is_err());
+    }
+
+    /// Parse rejects blobs with invalid pow_algo byte.
+    #[test]
+    fn parse_mining_blob_rejects_invalid_pow_algo() {
+        let hash = [0x42u8; 32];
+        let mut blob = build_tari_mining_blob(&hash, 0, POW_ALGO_RANDOMXT);
+
+        // Corrupt the pow_algo byte
+        blob[43] = 99; // Invalid algorithm
+
         assert!(parse_mining_blob(&blob).is_err());
     }
 }

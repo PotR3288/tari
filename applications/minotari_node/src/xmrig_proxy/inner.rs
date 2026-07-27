@@ -97,7 +97,7 @@ impl InnerService {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_get_block_template(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        // 1. Parse miner identity from request (two-layer: extra_nonce > peer_addr for nonce partitioning).
+        // 1. Parse miner identity from request (used for logging/debugging only).
         let miner_id = parse_miner_id_from_request(req, self.peer_addr);
         let requested_wallet_address = parse_wallet_address_from_request(req);
         let payment_address = match &requested_wallet_address {
@@ -214,6 +214,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::StreamExt;
+    use http_body_util::BodyExt;
     use primitive_types::U512;
     use serde_json::json;
     use tari_common::configuration::Network;
@@ -654,5 +655,154 @@ mod tests {
 
         // Miner should still be registered (registration happens before the comms call).
         assert_eq!(miner_registry.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_method_returns_error() {
+        // When an unknown JSON-RPC method is requested, the proxy returns -32601 "Method not found"
+        let config_wallet = make_address_for_network(Network::LocalNet);
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        task::spawn(async move {
+            if let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: config_wallet.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        // Request with an unknown method
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "unknown_method_xyz",
+                "params": {},
+                "id": 42,
+            }))
+            .unwrap(),
+        );
+
+        let result = service.handle(body).await;
+        assert!(result.is_ok());
+
+        // Check the response contains error code -32601
+        let response = result.unwrap();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(parsed["error"]["code"], -32601);
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Method not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_concurrent_requests_same_miner_dedup() {
+        // Multiple concurrent requests from the same miner (same wallet address)
+        // should be deduplicated at the registry level.
+        let config_wallet = make_address_for_network(Network::LocalNet);
+        let base58 = config_wallet.to_base58();
+        let (comms, mut req_rx) = make_mock_comms();
+        let block_templates = BlockTemplateStorage::new();
+        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
+            max_miners: 32,
+            miner_timeout_secs: 300,
+        });
+
+        // Spawn a task that handles requests in a loop
+        tokio::spawn(async move {
+            while let Some(req_ctx) = req_rx.next().await {
+                match req_ctx.request() {
+                    NodeCommsRequest::GetChainMetadata => {
+                        let metadata = make_chain_metadata(100, [1u8; 32]);
+                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
+                    },
+                    _ => {}, // Ignore other requests
+                };
+            }
+        });
+
+        let state_machine = make_state_machine();
+
+        let service = InnerService {
+            node_service: comms,
+            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
+            state_machine,
+            block_templates,
+            wallet_payment_address: config_wallet.clone(),
+            network: Network::LocalNet,
+            coinbase_extra: Vec::new(),
+            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
+            miner_registry: miner_registry.clone(),
+            peer_addr: "127.0.0.1:40000".parse().unwrap(),
+        };
+
+        let body = bytes::Bytes::from(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "method": "getblocktemplate",
+                "params": { "wallet_address": base58 },
+                "id": 1,
+            }))
+            .unwrap(),
+        );
+
+        // Make multiple concurrent requests with the same wallet address
+        let handle1 = {
+            let body1 = body.clone();
+            let service1 = service.clone();
+            tokio::spawn(async move { service1.handle(body1).await })
+        };
+
+        let handle2 = {
+            let body2 = body.clone();
+            let service2 = service.clone();
+            tokio::spawn(async move { service2.handle(body2).await })
+        };
+
+        // Both requests should succeed (may fail at comms layer but not at registry level)
+        let result1 = handle1.await.unwrap_or_else(|_| panic!("First request failed"));
+        let result2 = handle2.await.unwrap_or_else(|_| panic!("Second request failed"));
+
+        // Only one miner entry should exist in the registry despite concurrent requests
+        assert_eq!(miner_registry.len().await, 1);
+
+        // Both responses should be valid JSON-RPC responses
+        for result in [result1, result2] {
+            if result.is_ok() {
+                let response = result.unwrap();
+                let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+                // Should either be a success or an error (e.g., max miners)
+                assert!(parsed.get("result").is_some() || parsed.get("error").is_some());
+            }
+        }
     }
 }

@@ -53,6 +53,9 @@ pub async fn get_chain_tip(handler: &mut LocalNodeCommsInterface) -> Result<Chai
 /// the current chain tip height for use by callers who need it (e.g., computing the next
 /// block height). This avoids a redundant metadata fetch — the caller can reuse the
 /// height instead of calling `get_metadata()` again.
+///
+/// When Tari's chain tip advances, ALL cached templates become stale because they reference
+/// the old `prev_hash`. We must evict all templates regardless of algorithm.
 pub async fn check_chain_tip_advance(
     handler: &mut LocalNodeCommsInterface,
     block_templates: &BlockTemplateStorage,
@@ -60,10 +63,8 @@ pub async fn check_chain_tip_advance(
     let current_tip = get_chain_tip(handler).await?;
     let advanced = block_templates.update_chain_tip(current_tip).await;
     if advanced {
-        debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting RandomXT templates", current_tip.height, current_tip.top_hash);
-        block_templates
-            .evict_for_algorithm(tari_transaction_components::tari_proof_of_work::PowAlgorithm::RandomXT)
-            .await;
+        debug!(target: LOG_TARGET, "Chain tip advanced to height #{} (hash {}), evicting all cached templates", current_tip.height, current_tip.top_hash);
+        block_templates.evict_all().await;
     }
     Ok((advanced, current_tip.height))
 }
@@ -81,15 +82,10 @@ mod tests {
     };
     use tari_node_components::blocks::BlockBuilder;
     use tari_service_framework::reply_channel;
-    use tari_transaction_components::tari_proof_of_work::PowAlgorithm;
     use tari_utilities::ByteArray;
     use tokio::sync::broadcast;
 
     use super::*;
-
-    // ---------------------------------------------------------------------------
-    // Fixtures & helpers
-    // ---------------------------------------------------------------------------
 
     /// Build a ChainMetadata fixture at the given height and hash.
     fn make_metadata(height: u64, hash: [u8; 32]) -> ChainMetadata {
@@ -217,7 +213,6 @@ mod tests {
                 TariAddress::default(),
                 "miner".to_string(),
                 1,
-                PowAlgorithm::RandomXT,
                 [0x42u8; 32],
             )
             .await;
@@ -268,7 +263,6 @@ mod tests {
                 TariAddress::default(),
                 "miner".to_string(),
                 1,
-                PowAlgorithm::RandomXT,
                 [0x42u8; 32],
             )
             .await;
