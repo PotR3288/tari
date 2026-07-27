@@ -186,6 +186,10 @@ pub struct BaseNodeConfig {
     /// Seconds of inactivity before a miner is considered stale and evicted (default: 300).
     #[serde(default = "default_xmrig_proxy_miner_timeout_secs")]
     pub xmrig_proxy_miner_timeout_secs: u64,
+    /// Cleanup interval for the XMRig proxy - how often to check for stale miners (default: 600 seconds / 10 min).
+    /// Should be shorter than or equal to miner_timeout_secs for timely eviction.
+    #[serde(default = "default_xmrig_proxy_cleanup_interval_secs")]
+    pub xmrig_proxy_cleanup_interval_secs: u64,
 }
 
 fn default_xmrig_proxy_max_miners() -> usize {
@@ -193,6 +197,12 @@ fn default_xmrig_proxy_max_miners() -> usize {
 }
 
 fn default_xmrig_proxy_miner_timeout_secs() -> u64 {
+    300
+}
+
+// Default cleanup interval is same as miner timeout (300s = 5 min)
+// This ensures stale miners are evicted promptly after becoming stale.
+fn default_xmrig_proxy_cleanup_interval_secs() -> u64 {
     300
 }
 
@@ -274,6 +284,7 @@ impl Default for BaseNodeConfig {
             xmrig_proxy_range_proof_type: RangeProofType::RevealedValue,
             xmrig_proxy_max_miners: 128,
             xmrig_proxy_miner_timeout_secs: 300,
+            xmrig_proxy_cleanup_interval_secs: 600,
         }
     }
 }

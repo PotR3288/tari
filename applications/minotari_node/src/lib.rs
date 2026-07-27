@@ -274,6 +274,7 @@ pub async fn run_base_node_with_cli(
             let proxy_range_proof = config.base_node.xmrig_proxy_range_proof_type;
             let proxy_max_miners = config.base_node.xmrig_proxy_max_miners;
             let proxy_miner_timeout_secs = config.base_node.xmrig_proxy_miner_timeout_secs;
+            let proxy_cleanup_interval_secs = config.base_node.xmrig_proxy_cleanup_interval_secs;
             let signal = shutdown.to_signal();
             let network = config.base_node.network;
             let node_service = ctx.local_node();
@@ -294,6 +295,7 @@ pub async fn run_base_node_with_cli(
                             proxy_range_proof,
                             proxy_max_miners,
                             proxy_miner_timeout_secs,
+                            proxy_cleanup_interval_secs,
                             signal,
                         )
                         .await
