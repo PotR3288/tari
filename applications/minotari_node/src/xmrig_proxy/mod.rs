@@ -60,7 +60,6 @@ use self::{
 };
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy";
-const CLEANUP_INTERVAL_SECS: u64 = 10 * 60;
 
 /// Start the XMRig-compatible JSON-RPC proxy server embedded in the base node.
 ///
@@ -79,6 +78,7 @@ const CLEANUP_INTERVAL_SECS: u64 = 10 * 60;
 /// * `range_proof_type` - range proof type for coinbase outputs
 /// * `max_miners` - maximum concurrent miners allowed in the registry
 /// * `miner_timeout_secs` - seconds of inactivity before a miner is evicted
+/// * `cleanup_interval_secs` - how often to check for stale miners (should be <= miner_timeout_secs)
 /// * `shutdown` - shutdown signal from the base node
 pub async fn run_xmrig_proxy(
     node_service: LocalNodeCommsInterface,
@@ -91,6 +91,7 @@ pub async fn run_xmrig_proxy(
     range_proof_type: RangeProofType,
     max_miners: usize,
     miner_timeout_secs: u64,
+    cleanup_interval_secs: u64,
     shutdown: ShutdownSignal,
 ) -> Result<(), anyhow::Error> {
     let listen_addr = multiaddr_to_socketaddr(&listener_address)?;
@@ -105,7 +106,7 @@ pub async fn run_xmrig_proxy(
     // Periodic cleanup of stale miners
     let cleanup_registry = miner_registry.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
         loop {
             interval.tick().await;
             // Evict stale miners from the registry.
