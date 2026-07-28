@@ -197,13 +197,13 @@ fn default_xmrig_proxy_max_miners() -> usize {
 }
 
 fn default_xmrig_proxy_miner_timeout_secs() -> u64 {
-    300
+    1800
 }
 
 // Default cleanup interval is same as miner timeout (300s = 5 min)
 // This ensures stale miners are evicted promptly after becoming stale.
 fn default_xmrig_proxy_cleanup_interval_secs() -> u64 {
-    300
+    1200
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
