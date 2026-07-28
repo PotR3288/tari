@@ -87,7 +87,7 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
 
                     // Map error variants to appropriate JSON-RPC codes
                     let json_error_code = match &e {
-                        XmrigProxyError::InvalidRequest(_) | XmrigProxyError::MissingData(_) => -32602, // Invalid params / Invalid request
+                        XmrigProxyError::InvalidRequest(_) | XmrigProxyError::MissingData(_) => -32603, // Validation error (content validation failures like invalid hex)
                         _ => -32603, // Internal error (includes CommsError, MaxMinersReached)
                     };
 

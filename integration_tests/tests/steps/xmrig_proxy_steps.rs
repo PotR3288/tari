@@ -254,6 +254,7 @@ async fn xmrig_proxy_submit_stored_blob(world: &mut TariWorld, base_node_name: S
 // ---------------------------------------------------------------------------
 
 #[when(expr = r"I store the block template blob from the last response")]
+#[then(expr = r"I store the block template blob from the last response")]
 async fn xmrig_proxy_store_blob(world: &mut TariWorld) {
     let blob = world
         .last_xmrig_proxy_response
@@ -577,6 +578,7 @@ async fn xmrig_proxy_get_template_with_miner_id_and_wallet(
 
 /// Store the `height` field from the last response under a named key.
 #[when(expr = r#"I store the response height as {string}"#)]
+#[then(expr = r#"I store the response height as {string}"#)]
 async fn xmrig_proxy_store_response_height(world: &mut TariWorld, name: String) {
     let height = world
         .last_xmrig_proxy_response
@@ -616,6 +618,7 @@ fn xmrig_proxy_assert_height_matches(world: &mut TariWorld, name: String) {
 
 /// Store the `prev_hash` field from the last response under a named key.
 #[when(expr = r#"I store the response prev_hash as {string}"#)]
+#[then(expr = r#"I store the response prev_hash as {string}"#)]
 async fn xmrig_proxy_store_response_prev_hash(world: &mut TariWorld, name: String) {
     let prev_hash = world
         .last_xmrig_proxy_response
