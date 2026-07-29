@@ -152,31 +152,40 @@ impl BlockTemplateStorage {
         let stored = !is_replacement;
 
         if is_replacement {
+            // Add this miner to existing template's assigned miners
+            if let Some(entry) = map.get_mut(&key) {
+                debug!(
+                    target: LOG_TARGET,
+                    "Adding miner {} to cached template for address {} (mining_hash={})",
+                    miner_id.clone(),
+                    entry.wallet_address.clone(),
+                    hex::encode(key)
+                );
+                entry.assigned_miners.insert(miner_id.clone());
+            }
             debug!(
                 target: LOG_TARGET,
-                "Replaced cached template for address {} and miner ID {} (mining_hash={})",
-                wallet_address.clone(),
-                miner_id.clone(),
+                "Template already stored by concurrent request for key {}",
                 hex::encode(key)
             );
         } else {
             info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
-        }
 
-        map.insert(
-            key,
-            TemplateEntry {
-                block,
-                wallet_address,
-                assigned_miners: {
-                    let mut set = HashSet::new();
-                    set.insert(miner_id.clone());
-                    set
+            map.insert(
+                key,
+                TemplateEntry {
+                    block,
+                    wallet_address,
+                    assigned_miners: {
+                        let mut set = HashSet::new();
+                        set.insert(miner_id.clone());
+                        set
+                    },
+                    target_difficulty,
+                    vm_key,
                 },
-                target_difficulty,
-                vm_key,
-            },
-        );
+            );
+        }
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
 
         stored // Return true if we actually stored (not replacement)
