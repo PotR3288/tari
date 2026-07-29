@@ -110,10 +110,25 @@ impl BlockTemplateStorage {
         vm_key: [u8; 32],
     ) {
         let mut map = self.inner.write().await;
-        
+
         // Check if template already exists for this key
         let is_replacement = map.contains_key(&key);
-        
+
+        debug!(
+            target: LOG_TARGET,
+            "store called: key={}, wallet_address={}, miner_id={}, is_replacement={}",
+            hex::encode(key),
+            wallet_address.clone(),
+            miner_id.clone(),
+            is_replacement
+        );
+
+        debug!(
+            target: LOG_TARGET,
+            "map state before store: {} templates in map",
+            map.len()
+        );
+
         if is_replacement {
             debug!(
                 target: LOG_TARGET,
