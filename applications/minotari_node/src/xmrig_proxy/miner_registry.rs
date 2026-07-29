@@ -22,8 +22,11 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
+use log::{debug, info, warn};
 use tari_common_types::tari_address::TariAddress;
 use tokio::sync::RwLock;
+
+const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::miner_registry";
 
 use super::MinerId;
 use crate::xmrig_proxy::error::XmrigProxyError;
@@ -81,6 +84,11 @@ impl MinerRegistry {
         // Check if any existing entry has the same payment address (dedup by wallet).
         for (_key, entry) in map.iter_mut() {
             if &entry.payment_address == payment_address {
+                debug!(
+                    target: LOG_TARGET,
+                    "Refreshed activity for miner with payment address {}",
+                    payment_address
+                );
                 entry.last_activity = Instant::now();
                 return Ok(entry.clone());
             }
@@ -88,6 +96,12 @@ impl MinerRegistry {
 
         // New miner — check capacity.
         if map.len() >= self.config.max_miners {
+            warn!(
+                target: LOG_TARGET,
+                "Max miners ({}) reached, rejecting new miner with payment address {}",
+                self.config.max_miners,
+                payment_address
+            );
             return Err(XmrigProxyError::MaxMinersReached(self.config.max_miners));
         }
 
@@ -99,6 +113,12 @@ impl MinerRegistry {
 
         // Use the wallet address string as the key.
         let key = payment_address.to_string();
+        debug!(
+            target: LOG_TARGET,
+            "Registered new miner with payment address {} (registry size: {})",
+            payment_address,
+            map.len().saturating_add(1)
+        );
         let entry_clone = entry.clone();
         map.insert(key, entry);
 
@@ -118,7 +138,22 @@ impl MinerRegistry {
             .collect();
 
         for id in &stale_ids {
+            debug!(
+                target: LOG_TARGET,
+                "Evicted stale miner {} (timeout after {}s)",
+                id,
+                self.config.miner_timeout_secs
+            );
             map.remove(id);
+        }
+
+        if !stale_ids.is_empty() {
+            info!(
+                target: LOG_TARGET,
+                "Evicted {} stale miners, registry now has {} entries",
+                stale_ids.len(),
+                map.len()
+            );
         }
 
         stale_ids
