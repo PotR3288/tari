@@ -244,7 +244,7 @@ pub async fn finalize_and_store(
 ) -> Result<TemplateBuildResult, XmrigProxyError> {
     // Ask the node to finalize the block (fills in MMR roots etc.).
     let new_block = handler.get_new_block(new_template).await.map_err(|e| {
-        log::warn!(target: "minotari::base_node::xmrig_proxy", "Failed to get new block: {e}");
+        warn!(target: LOG_TARGET, "Failed to get new block: {e}");
         e
     })?;
 
