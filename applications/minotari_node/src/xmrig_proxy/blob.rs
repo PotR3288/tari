@@ -51,7 +51,10 @@ const TARI_MINING_BLOB_SIZE: usize = 76;
 /// The pow_algo byte value for RandomXT (= 2).
 pub const POW_ALGO_RANDOMXT: u8 = 2;
 
+use log::warn;
 use crate::xmrig_proxy::error::XmrigProxyError;
+
+const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::blob";
 
 /// Build a 76-byte XMRig-compatible mining blob for Tari RandomXT.
 pub fn build_tari_mining_blob(mining_hash: &[u8], nonce: u64, pow_algo: u8) -> Vec<u8> {
@@ -66,6 +69,11 @@ pub fn build_tari_mining_blob(mining_hash: &[u8], nonce: u64, pow_algo: u8) -> V
 /// Parse the mining hash and nonce from a Tari mining blob.
 pub fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError> {
     if blob.len() != TARI_MINING_BLOB_SIZE {
+        warn!(
+            target: LOG_TARGET,
+            "Invalid blob length: {} (expected {TARI_MINING_BLOB_SIZE})",
+            blob.len()
+        );
         return Err(XmrigProxyError::InvalidRequest(format!(
             "blob length {} does not match expected {TARI_MINING_BLOB_SIZE}",
             blob.len()
@@ -88,6 +96,10 @@ pub fn parse_mining_blob(blob: &[u8]) -> Result<([u8; 32], u64), XmrigProxyError
     // Validate pow_algo byte is within expected range
     let pow_algo_byte = blob[TARI_BLOB_RESERVED_OFFSET as usize + TARI_NONCE_SIZE];
     if pow_algo_byte != POW_ALGO_RANDOMXT {
+        warn!(
+            target: LOG_TARGET,
+            "Invalid pow_algo byte: {pow_algo_byte} (expected {POW_ALGO_RANDOMXT} for RandomXT)"
+        );
         return Err(XmrigProxyError::InvalidRequest(format!(
             "invalid pow_algo byte: {pow_algo_byte} (expected {POW_ALGO_RANDOMXT} for RandomXT)"
         )));
