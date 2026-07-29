@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
 };
 
+use hex;
 use log::{debug, info};
 use tari_common_types::{tari_address::TariAddress, types::BlockHash};
 use tari_node_components::blocks::Block;
@@ -108,8 +109,23 @@ impl BlockTemplateStorage {
         target_difficulty: u64,
         vm_key: [u8; 32],
     ) {
-        info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
         let mut map = self.inner.write().await;
+        
+        // Check if template already exists for this key
+        let is_replacement = map.contains_key(&key);
+        
+        if is_replacement {
+            debug!(
+                target: LOG_TARGET,
+                "Replaced cached template for address {} and miner ID {} (mining_hash={})",
+                wallet_address.clone(),
+                miner_id.clone(),
+                hex::encode(key)
+            );
+        } else {
+            info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
+        }
+        
         map.insert(
             key,
             TemplateEntry {
