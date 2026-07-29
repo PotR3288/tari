@@ -32,6 +32,7 @@
 //! - `build_template_response()` — fetch stored block, derive mining data, return JSON-RPC response
 
 use hyper::{Response, StatusCode};
+use log::warn;
 use serde_json::{Value, json};
 
 use tari_common_types::types::{
