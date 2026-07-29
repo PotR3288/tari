@@ -30,9 +30,13 @@ use log::{debug, info};
 use tari_common_types::{tari_address::TariAddress, types::BlockHash};
 use tari_node_components::blocks::Block;
 use tari_utilities::ByteArray;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 
 use super::MinerId;
+
+/// Per-template-key lock to prevent duplicate template builds.
+/// Keyed by mining hash (template key).
+type TemplateLockMap = HashMap<[u8; 32], Arc<Mutex<()>>>;
 
 const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::storage";
 
@@ -73,6 +77,9 @@ pub struct TemplateEntry {
 #[derive(Clone)]
 pub struct BlockTemplateStorage {
     inner: Arc<RwLock<HashMap<[u8; 32], TemplateEntry>>>,
+    /// Per-template locks to prevent duplicate template builds.
+    /// Keyed by mining hash (template key).
+    template_locks: Arc<RwLock<TemplateLockMap>>,
     /// Last known chain tip — updated whenever we fetch a fresh template from Tari.
     last_known_tip: Arc<RwLock<ChainTip>>,
 }
@@ -81,6 +88,7 @@ impl BlockTemplateStorage {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            template_locks: Arc::new(RwLock::new(HashMap::new())),
             last_known_tip: Arc::new(RwLock::new(ChainTip::default())),
         }
     }
@@ -100,6 +108,9 @@ impl BlockTemplateStorage {
     }
 
     /// Store a block template. If a template with the same key already exists it is replaced.
+    /// 
+    /// This method uses per-template locking to prevent duplicate builds. Returns `true` if the
+    /// template was actually stored (not already present), `false` if another thread beat us to it.
     pub async fn store(
         &self,
         key: [u8; 32],
@@ -108,10 +119,19 @@ impl BlockTemplateStorage {
         miner_id: MinerId,
         target_difficulty: u64,
         vm_key: [u8; 32],
-    ) {
-        let mut map = self.inner.write().await;
+    ) -> bool {
+        // Acquire per-template lock to prevent concurrent builds for same key
+        let mut map = self.template_locks.write().await;
+        let lock_entry = map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))).clone();
+        
+        // Drop the template_locks write lock before acquiring the per-key lock
+        drop(map);
 
-        // Check if template already exists for this key
+        // Acquire the per-template lock (this serializes builds for same key)
+        let _lock = lock_entry.lock().await;
+
+        // Now check again in case another thread stored while we were waiting
+        let mut map = self.inner.write().await;
         let is_replacement = map.contains_key(&key);
 
         debug!(
@@ -129,6 +149,8 @@ impl BlockTemplateStorage {
             map.len()
         );
 
+        let stored = !is_replacement;
+
         if is_replacement {
             debug!(
                 target: LOG_TARGET,
@@ -140,7 +162,7 @@ impl BlockTemplateStorage {
         } else {
             info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
         }
-        
+
         map.insert(
             key,
             TemplateEntry {
@@ -156,6 +178,8 @@ impl BlockTemplateStorage {
             },
         );
         debug!(target: LOG_TARGET, "Stored template, total templates={}", map.len());
+
+        stored // Return true if we actually stored (not replacement)
     }
 
     /// Look up a cached template by wallet address.
@@ -216,6 +240,10 @@ impl BlockTemplateStorage {
     /// When ANY block is found and the chain tip advances, all cached templates become stale
     /// because they reference the old `prev_hash`. We must evict all templates regardless of algorithm.
     pub async fn evict_all(&self) {
+        // First, clear template locks to allow new builds
+        let mut lock_map = self.template_locks.write().await;
+        lock_map.clear();
+        
         let mut map = self.inner.write().await;
         let before = map.len();
         map.clear();
@@ -430,5 +458,51 @@ mod tests {
 
         assert!(storage.get(&key1).await.is_none());
         assert!(storage.get(&key2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_store_calls_same_key_only_stores_once() {
+        let storage = BlockTemplateStorage::new();
+        let key: [u8; 32] = [0x42; 32];
+        let address = TariAddress::default();
+
+        // Spawn multiple concurrent store calls for the same key
+        let handle1 = {
+            let s = storage.clone();
+            tokio::spawn(async move {
+                s.store(key, make_test_block(), address.clone(), "miner1".to_string(), 100, [0x42; 32]).await
+            })
+        };
+        let handle2 = {
+            let s = storage.clone();
+            tokio::spawn(async move {
+                s.store(key, make_test_block(), address.clone(), "miner2".to_string(), 100, [0x42; 32]).await
+            })
+        };
+        let handle3 = {
+            let s = storage.clone();
+            tokio::spawn(async move {
+                s.store(key, make_test_block(), address.clone(), "miner3".to_string(), 100, [0x42; 32]).await
+            })
+        };
+
+        // All should complete
+        let r1 = handle1.await.unwrap();
+        let r2 = handle2.await.unwrap();
+        let r3 = handle3.await.unwrap();
+
+        // Only one should have actually stored (returned true)
+        let stored_count = [r1, r2, r3].iter().filter(|&&x| x).count();
+        assert_eq!(stored_count, 1, "Only one store call should succeed; others should return false");
+
+        // There should be exactly one template in the cache
+        assert_eq!(storage.inner.read().await.len(), 1);
+
+        // All miners should be assigned to the same template
+        let entry = storage.get_by_key(&key).await.unwrap();
+        assert_eq!(entry.assigned_miners.len(), 3);
+        assert!(entry.assigned_miners.contains(&"miner1".to_string()));
+        assert!(entry.assigned_miners.contains(&"miner2".to_string()));
+        assert!(entry.assigned_miners.contains(&"miner3".to_string()));
     }
 }
