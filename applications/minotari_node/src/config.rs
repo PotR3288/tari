@@ -183,10 +183,10 @@ pub struct BaseNodeConfig {
     /// Maximum concurrent miners allowed in the registry (default: 128).
     #[serde(default = "default_xmrig_proxy_max_miners")]
     pub xmrig_proxy_max_miners: usize,
-    /// Seconds of inactivity before a miner is considered stale and evicted (default: 300).
+    /// Seconds of inactivity before a miner is considered stale and evicted (default: 1800).
     #[serde(default = "default_xmrig_proxy_miner_timeout_secs")]
     pub xmrig_proxy_miner_timeout_secs: u64,
-    /// Cleanup interval for the XMRig proxy - how often to check for stale miners (default: 600 seconds / 10 min).
+    /// Cleanup interval for the XMRig proxy - how often to check for stale miners (default: 1200 seconds / 20 min).
     /// Should be shorter than or equal to miner_timeout_secs for timely eviction.
     #[serde(default = "default_xmrig_proxy_cleanup_interval_secs")]
     pub xmrig_proxy_cleanup_interval_secs: u64,
@@ -200,7 +200,7 @@ fn default_xmrig_proxy_miner_timeout_secs() -> u64 {
     1800
 }
 
-// Default cleanup interval is same as miner timeout (300s = 5 min)
+// Default cleanup interval is 1200 seconds (20 minutes), shorter than miner_timeout_secs
 // This ensures stale miners are evicted promptly after becoming stale.
 fn default_xmrig_proxy_cleanup_interval_secs() -> u64 {
     1200

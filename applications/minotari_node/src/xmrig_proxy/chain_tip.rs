@@ -49,13 +49,13 @@ pub async fn get_chain_tip(handler: &mut LocalNodeCommsInterface) -> Result<Chai
 
 /// Check whether the chain has advanced and evict stale templates if so.
 ///
-/// Returns `true` if a tip advance was detected (templates were evicted), along with
+/// Returns `true` if a tip advance was detected along with
 /// the current chain tip height for use by callers who need it (e.g., computing the next
 /// block height). This avoids a redundant metadata fetch — the caller can reuse the
 /// height instead of calling `get_metadata()` again.
 ///
 /// When Tari's chain tip advances, ALL cached templates become stale because they reference
-/// the old `prev_hash`. We must evict all templates regardless of algorithm.
+/// the old `prev_hash`. All templates must be evicted regardless of algorithm.
 pub async fn check_chain_tip_advance(
     handler: &mut LocalNodeCommsInterface,
     block_templates: &BlockTemplateStorage,
