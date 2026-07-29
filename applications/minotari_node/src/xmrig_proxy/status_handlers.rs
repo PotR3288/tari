@@ -26,22 +26,44 @@
 //! software (some miners use these endpoints to report status or display network info).
 
 use hyper::{Response, StatusCode};
+use log::{debug, warn};
 use serde_json::{Value, json};
 use tari_core::base_node::LocalNodeCommsInterface;
 
 use super::{error::XmrigProxyError, service::ProxyBody};
+
+const LOG_TARGET: &str = "minotari::base_node::xmrig_proxy::status_handlers";
 
 /// Handle GET /get_height, /getinfo, /getheight requests (some mining software uses these).
 pub async fn handle_get(
     path: &str,
     handler: &mut LocalNodeCommsInterface,
 ) -> Result<Response<ProxyBody>, XmrigProxyError> {
-    match path {
+    debug!(target: LOG_TARGET, "GET request for path: {}", path);
+    
+    let result = match path {
         "/get_height" | "/getblockcount" => get_height(&json!({}), handler).await,
         "/getheight" => get_height_hash(handler).await,
         "/getinfo" | "/get_info" => get_info(handler).await,
-        _ => super::service::json_response(StatusCode::NOT_FOUND, &json!({"error": "Not found"})),
+        _ => {
+            debug!(target: LOG_TARGET, "Unknown path: {}", path);
+            super::service::json_response(StatusCode::NOT_FOUND, &json!({"error": "Not found"}))
+        },
+    };
+    
+    match &result {
+        Ok(_) => {
+            debug!(target: LOG_TARGET, "GET {} succeeded", path);
+        },
+        Err(e) => {
+            warn!(
+                target: LOG_TARGET,
+                "GET {} failed: {}", path, e
+            );
+        },
     }
+    
+    Ok(result?)
 }
 
 /// Handle GET /get_height and /getblockcount — returns block count.
