@@ -197,3 +197,9 @@ loggers:
     level: warn
     appenders:
       - message_logging
+
+  # XMRig proxy logging
+  minotari::base_node::xmrig_proxy:
+    level: info
+    appenders:
+      - base_layer
