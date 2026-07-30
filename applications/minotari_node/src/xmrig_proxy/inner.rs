@@ -97,8 +97,20 @@ impl InnerService {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_get_block_template(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        // 1. Parse miner identity from request (used for logging/debugging only).
+        // Log request start with miner identity for debugging concurrent requests
         let miner_id = parse_miner_id_from_request(req, self.peer_addr);
+        trace!(
+            target: LOG_TARGET,
+            "Processing getblocktemplate for miner {} at {}, payment_address={}",
+            miner_id,
+            self.peer_addr,
+            if req.get("params").and_then(|p| p.get("wallet_address")).is_some() {
+                "provided"
+            } else {
+                "default"
+            }
+        );
+        
         let requested_wallet_address = parse_wallet_address_from_request(req);
         let payment_address = match &requested_wallet_address {
             Some(addr) if addr.network() == self.network => requested_wallet_address.clone().unwrap(),
