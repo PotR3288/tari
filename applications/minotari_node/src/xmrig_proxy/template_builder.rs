@@ -291,7 +291,7 @@ pub async fn finalize_and_store(
         miner_id.clone()
     );
 
-    let stored = block_templates
+    block_templates
         .store(
             mining_hash_key,
             new_block,
@@ -301,15 +301,6 @@ pub async fn finalize_and_store(
             vm_key,
         )
         .await;
-
-    // If another thread beat us to storing, log it (this can happen with concurrent requests)
-    if !stored {
-        debug!(
-            target: LOG_TARGET,
-            "Template was already stored by concurrent request for key {}",
-            hex::encode(mining_hash_key)
-        );
-    }
 
     Ok(TemplateBuildResult { mining_hash_key })
 }
