@@ -26,7 +26,7 @@ use std::{
 };
 
 use hex;
-use log::{debug, info};
+use log::{debug};
 use tari_common_types::{tari_address::TariAddress, types::BlockHash};
 use tari_node_components::blocks::Block;
 use tari_utilities::ByteArray;
@@ -123,7 +123,7 @@ impl BlockTemplateStorage {
                 hex::encode(key)
             );
         } else {
-            info!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
+            debug!(target: LOG_TARGET, "Storing template for address {} and miner ID {}", wallet_address.clone(), miner_id.clone());
         }
         
         map.insert(
