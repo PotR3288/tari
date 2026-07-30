@@ -43,6 +43,16 @@ use super::MinerId;
 /// Used for nonce partitioning — each connection gets a unique ID so threads
 /// don't search overlapping nonce ranges.
 pub fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
+    // Log extra_nonce for debugging duplicate requests
+    if let Some(extra_nonce_val) = req.get("params").and_then(|p| p.get("extra_nonce")) {
+        let extra_nonce_str = extra_nonce_val.as_str().unwrap_or("");
+        log::debug!(
+            target: "minotari::base_node::xmrig_proxy",
+            "Received extra_nonce={}",
+            extra_nonce_str
+        );
+    }
+    
     // Layer 1: per-connection extra_nonce from XMRig (Tari fork).
     if let Some(extra_nonce) = req
         .get("params")

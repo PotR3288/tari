@@ -24,7 +24,7 @@ use std::{convert::Infallible, future::Future, pin::Pin};
 
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, Response, StatusCode, body::Incoming};
-use log::{error, trace};
+use log::{debug, error, trace};
 use serde_json::Value;
 
 use super::{error::XmrigProxyError, inner::InnerService};
@@ -63,6 +63,9 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let inner = self.inner.clone();
         Box::pin(async move {
+            // Log the client connection for debugging concurrent requests
+            debug!(target: LOG_TARGET, "Client connection from {}", inner.peer_addr);
+            
             let method = req.method().clone();
             let path = req.uri().path().to_string();
             trace!(target: LOG_TARGET, "{method} {path}");
