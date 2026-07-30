@@ -32,7 +32,7 @@
 //! - `build_template_response()` — fetch stored block, derive mining data, return JSON-RPC response
 
 use hyper::{Response, StatusCode};
-use log::{debug, warn};
+use log::warn;
 use serde_json::{Value, json};
 
 use tari_common_types::types::{
@@ -282,14 +282,6 @@ pub async fn finalize_and_store(
         .as_slice()
         .try_into()
         .map_err(|_| XmrigProxyError::MissingData("mining hash not 32 bytes".to_string()))?;
-
-    debug!(
-        target: LOG_TARGET,
-        "finalize_and_store about to call store: key={}, wallet_address={}, miner_id={}",
-        hex::encode(mining_hash_key),
-        payment_address.clone(),
-        miner_id.clone()
-    );
 
     block_templates
         .store(
