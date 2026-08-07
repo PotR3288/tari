@@ -203,3 +203,4 @@ loggers:
     level: info
     appenders:
       - base_layer
+    additive: false
