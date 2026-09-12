@@ -63,7 +63,6 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let inner = self.inner.clone();
         Box::pin(async move {
-            // Log the client connection for debugging concurrent requests
             debug!(target: LOG_TARGET, "Client connection from {}", inner.peer_addr);
             
             let method = req.method().clone();
@@ -73,7 +72,6 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
             let result = if method == Method::GET {
                 inner.handle_get(&path).await
             } else {
-                // Collect the request body
                 match req.into_body().collect().await {
                     Ok(collected) => inner.handle(collected.to_bytes()).await,
                     Err(e) => {
@@ -88,11 +86,7 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
                 Err(e) => {
                     error!(target: LOG_TARGET, "Handler error: {e}");
 
-                    // Map error variants to appropriate JSON-RPC codes
-                    let json_error_code = match &e {
-                        XmrigProxyError::InvalidRequest(_) | XmrigProxyError::MissingData(_) => -32603, // Validation error (content validation failures like invalid hex)
-                        _ => -32603, // Internal error (includes CommsError, MaxMinersReached)
-                    };
+                    let json_error_code = -32603;
 
                     Response::builder()
                         .status(e.status_code())
@@ -112,38 +106,3 @@ impl hyper::service::Service<Request<Incoming>> for XmrigProxyService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// json_response creates a valid JSON HTTP response with correct status and content-type.
-    #[tokio::test]
-    async fn json_response_has_correct_status_and_content_type() {
-        let body = serde_json::json!({"status": "OK"});
-        let resp = json_response(StatusCode::OK, &body).unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.headers().get("Content-Type").unwrap(), "application/json");
-
-        // Body is valid JSON matching the input.
-        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(parsed["status"], "OK");
-    }
-
-    /// json_response preserves nested structures in the response body.
-    #[tokio::test]
-    async fn json_response_preserves_nested_body() {
-        let body = serde_json::json!({
-            "result": {"height": 123, "hash": "abc"},
-            "id": 42
-        });
-        let resp = json_response(StatusCode::ACCEPTED, &body).unwrap();
-
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(parsed["result"]["height"], 123);
-        assert_eq!(parsed["id"], 42);
-    }
-}

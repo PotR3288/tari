@@ -97,7 +97,6 @@ pub async fn run_xmrig_proxy(
     let listen_addr = multiaddr_to_socketaddr(&listener_address)?;
     let block_templates = BlockTemplateStorage::new();
 
-    // Create shared miner registry before spawning cleanup tasks
     let miner_registry = MinerRegistry::new(MinerRegistryConfig {
         max_miners,
         miner_timeout_secs,
@@ -109,7 +108,6 @@ pub async fn run_xmrig_proxy(
         let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
         loop {
             interval.tick().await;
-            // Evict stale miners from the registry.
             cleanup_registry.evict_stale().await;
         }
     });
@@ -147,7 +145,6 @@ pub async fn run_xmrig_proxy(
                         match result {
                             Ok((tcp, addr)) => {
                                 trace!(target: LOG_TARGET, "XMRig proxy: new connection from {addr}");
-                                // Clone the inner service and set peer_addr to the real remote address
                                 let mut inner = service.inner.clone();
                                 inner.peer_addr = addr;
                                 let svc = XmrigProxyService::new(inner);

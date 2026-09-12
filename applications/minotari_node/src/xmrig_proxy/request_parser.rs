@@ -22,10 +22,9 @@
 
 //! Request parsing helpers for XMRig JSON-RPC requests.
 //!
-//! Two-layer miner identity resolution:
-//! 1. `params.extra_nonce` — per-connection random nonce sent by XMRig (Tari fork).
-//!    Guarantees unique miner IDs even when multiple instances share the same wallet.
-//! 2. `peer_addr` — fall back to the remote socket address (IP:port) of the TCP connection.
+//! Miner identity resolution: `params.extra_nonce` first (per-connection random nonce
+//! sent by the Tari-forked XMRig, unique even when instances share a wallet), then the
+//! remote socket address, then an auto-generated ID.
 
 use std::{
     net::SocketAddr,
@@ -43,7 +42,6 @@ use super::MinerId;
 /// Used for nonce partitioning — each connection gets a unique ID so threads
 /// don't search overlapping nonce ranges.
 pub fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerId {
-    // Log extra_nonce for debugging duplicate requests
     if let Some(extra_nonce_val) = req.get("params").and_then(|p| p.get("extra_nonce")) {
         let extra_nonce_str = extra_nonce_val.as_str().unwrap_or("");
         log::debug!(
@@ -53,7 +51,6 @@ pub fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerI
         );
     }
     
-    // Layer 1: per-connection extra_nonce from XMRig (Tari fork).
     if let Some(extra_nonce) = req
         .get("params")
         .and_then(|p| p.get("extra_nonce"))
@@ -62,12 +59,12 @@ pub fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerI
         return extra_nonce.to_string();
     }
 
-    // Layer 2: peer socket address (IP:port) — distinguishes miners behind NAT
+    // Fall back to the peer socket address.
     if peer_addr != SocketAddr::from(([0, 0, 0, 0], 0)) {
         return peer_addr.to_string();
     }
 
-    // Layer 3: auto-generated unique ID — monotonic counter guarantees uniqueness
+    // Last resort: auto-generated ID.
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     format!(
@@ -81,12 +78,27 @@ pub fn parse_miner_id_from_request(req: &Value, peer_addr: SocketAddr) -> MinerI
 }
 
 /// Extract an optional wallet address override from a JSON-RPC request.
+///
+/// Returns `None` when the field is absent. An address that is present but fails
+/// to parse is reported as invalid and also returns `None` — the caller can then
+/// distinguish a malformed address from a simply missing one via the log.
 pub fn parse_wallet_address_from_request(req: &Value) -> Option<TariAddress> {
     let address_str = req
         .get("params")
         .and_then(|p| p.get("wallet_address"))
         .and_then(|v| v.as_str())?;
-    TariAddress::from_str(address_str).ok()
+    match TariAddress::from_str(address_str) {
+        Ok(addr) => Some(addr),
+        Err(e) => {
+            log::warn!(
+                target: "minotari::base_node::xmrig_proxy",
+                "Miner provided wallet_address '{}' which failed to parse: {}",
+                address_str,
+                e
+            );
+            None
+        },
+    }
 }
 
 #[cfg(test)]

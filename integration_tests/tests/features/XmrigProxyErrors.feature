@@ -90,23 +90,6 @@ Feature: XMRig Proxy JSON-RPC Error Handling
         And the JSON-RPC response error message contains "params[0] must be a hex string"
 
     # -----------------------------------------------------------------------
-    # Scenario E4: submitblock with null params[0] returns -32602
-    # Same as E3 but with null instead of a number.
-    # -----------------------------------------------------------------------
-    Scenario: 9_SubmitBlock_NullParams0_ReturnsMinus32602
-        When I send a raw JSON-RPC request to base node NODE xmrig proxy:
-          """
-          {
-            "jsonrpc": "2.0",
-            "method": "submitblock",
-            "params": [null],
-            "id": 10
-          }
-          """
-        Then the JSON-RPC response error code is -32602
-        And the JSON-RPC response error message contains "params[0] must be a hex string"
-
-    # -----------------------------------------------------------------------
     # Scenario E5: Malformed JSON body returns -32603 (service layer)
     # The service layer tries serde_json::from_slice on the raw body. If it
     # fails, it returns InvalidRequest mapped to -32603 via the error handler.

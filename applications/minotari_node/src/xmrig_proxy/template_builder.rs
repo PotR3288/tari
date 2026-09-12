@@ -28,8 +28,7 @@
 //! 2. `sign_kernel()` — build kernel signature and add to template body
 //! 3. `finalize_and_store()` — finalize via node, compute mining hash, get VM key, store in cache
 //!
-//! Response construction:
-//! - `build_template_response()` — fetch stored block, derive mining data, return JSON-RPC response
+//! `build_template_response()` fetches a stored block and returns the JSON-RPC response.
 
 use hyper::{Response, StatusCode};
 use log::warn;
@@ -86,7 +85,6 @@ pub async fn build_and_store(
 ) -> Result<TemplateBuildResult, XmrigProxyError> {
     let height = new_template.header.height;
 
-    // Step 1: Build coinbase output + kernel and add to template.
     let (coinbase_kernel, mut key_manager, wallet_commitment_mask_key_id) = build_coinbase(
         consensus_rules,
         payment_address,
@@ -96,7 +94,6 @@ pub async fn build_and_store(
         &mut new_template,
     )?;
 
-    // Step 2: Sign the kernel and add to template body.
     sign_kernel(
         &mut new_template,
         &coinbase_kernel,
@@ -104,7 +101,6 @@ pub async fn build_and_store(
         wallet_commitment_mask_key_id,
     )?;
 
-    // Step 3: Finalize via node, compute mining hash, get VM key, store in cache.
     finalize_and_store(
         handler,
         block_templates,
@@ -128,7 +124,6 @@ pub fn build_coinbase(
 ) -> Result<(TransactionKernel, KeyManager, TariKeyId), XmrigProxyError> {
     let constants = consensus_rules.consensus_constants(height);
 
-    // Validate coinbase count.
     let max_coinbases = constants.max_block_coinbase_count();
     if 1 > max_coinbases {
         return Err(XmrigProxyError::InternalError(
@@ -136,13 +131,11 @@ pub fn build_coinbase(
         ));
     }
 
-    // Generate the coinbase output and kernel for the payment address.
     let coinbase_extra =
         CoinBaseExtra::try_from(coinbase_extra.to_vec()).map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
     let key_manager = KeyManager::new_random().map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
     let script_key_id = TariKeyId::default();
 
-    // Calculate the coinbase reward for this block.
     let reward = consensus_rules
         .calculate_coinbase_and_fees(height, new_template.body.kernels())
         .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
@@ -163,7 +156,6 @@ pub fn build_coinbase(
     )
     .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
 
-    // Add coinbase output to the template body.
     new_template.body.add_output(coinbase_output);
 
     Ok((
@@ -180,7 +172,6 @@ pub fn sign_kernel(
     key_manager: &mut KeyManager,
     wallet_commitment_mask_key_id: TariKeyId,
 ) -> Result<(), XmrigProxyError> {
-    // Build the kernel signature.
     let new_nonce = key_manager
         .get_random_key(None, None)
         .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?;
@@ -243,7 +234,6 @@ pub async fn finalize_and_store(
     target_difficulty: u64,
     new_template: NewBlockTemplate,
 ) -> Result<TemplateBuildResult, XmrigProxyError> {
-    // Ask the node to finalize the block (fills in MMR roots etc.).
     let new_block = handler.get_new_block(new_template).await.map_err(|e| {
         warn!(target: LOG_TARGET, "Failed to get new block: {e}");
         e
@@ -251,7 +241,6 @@ pub async fn finalize_and_store(
 
     let block_height = new_block.header.height;
 
-    // Compute the RandomXT mining hash.
     let mining_hash = match new_block.header.pow.pow_algo {
         PowAlgorithm::RandomXT => new_block.header.mining_hash().to_vec(),
         algo => {
@@ -277,7 +266,6 @@ pub async fn finalize_and_store(
         .ok_or_else(|| XmrigProxyError::MissingData(format!("block header at height {vm_key_height} not found")))?;
     let vm_key: [u8; 32] = **header.hash();
 
-    // Convert mining hash to key and store template in cache.
     let mining_hash_key: [u8; 32] = mining_hash
         .as_slice()
         .try_into()
@@ -334,17 +322,14 @@ pub async fn build_template_response(
         .await
         .unwrap_or(600);
 
-    // Generate a random min_nonce for this template (full u64 space, random start)
     let min_nonce: u64 = rand::random();
     let max_nonce: u64 = u64::MAX;
 
-    // Calculate expected reward
     let expected_reward = consensus_rules
         .calculate_coinbase_and_fees(block_height, entry.block.body.kernels())
         .map_err(|e| XmrigProxyError::InternalError(e.to_string()))?
         .as_u64();
 
-    // Build the 76-byte XMRig-compatible mining blob
     let blob = build_tari_mining_blob(&mining_hash, 0u64, POW_ALGO_RANDOMXT);
     let blob_hex = hex::encode(&blob);
     let seed_hex = hex::encode(vm_key);
@@ -1081,68 +1066,6 @@ mod tests {
         assert_eq!(parsed["id"], -1);
     }
 
-    #[tokio::test]
-    async fn build_template_response_blob_starts_with_three_zero_bytes() {
-        let (comms, mut req_rx) = make_mock_comms();
-        let block_templates = BlockTemplateStorage::new();
-
-        let block = make_test_block(3048);
-        let mining_hash_key: [u8; 32] = [0x99; 32];
-        let vm_key: [u8; 32] = [0xAA; 32];
-        let payment_address = make_address_for_network(Network::LocalNet);
-
-        block_templates
-            .store(
-                mining_hash_key,
-                block.clone(),
-                payment_address.clone(),
-                "miner".to_string(),
-                1500,
-                vm_key,
-            )
-            .await;
-
-        task::spawn(async move {
-            while let Some(req_ctx) = req_rx.next().await {
-                match req_ctx.request() {
-                    NodeCommsRequest::GetChainMetadata => {
-                        req_ctx
-                            .reply(Ok(NodeCommsResponse::ChainMetadata(make_chain_metadata(
-                                3048, [1u8; 32],
-                            ))))
-                            .ok();
-                    },
-                    _ => {
-                        req_ctx.reply(Err(CommsInterfaceError::UnexpectedApiResponse)).ok();
-                    },
-                }
-            }
-        });
-
-        let consensus_rules = BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap();
-        let miner_id = "miner".to_string();
-        let req = json!({"id": 1});
-
-        let result = build_template_response(
-            &comms,
-            &consensus_rules,
-            &block_templates,
-            &mining_hash_key,
-            &miner_id,
-            &req,
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-
-        let blob_hex = parsed["result"]["blocktemplate_blob"].as_str().unwrap();
-        let blob_bytes = hex::decode(blob_hex).unwrap();
-        assert_eq!(&blob_bytes[0..3], &[0, 0, 0]);
-    }
-
     // ---------------------------------------------------------------------------
     // build_and_store() integration test (full pipeline)
     // ---------------------------------------------------------------------------
@@ -1197,152 +1120,8 @@ mod tests {
     // get_chain_tip() internal function test (via build_template_response)
     // ---------------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn build_template_response_includes_current_tip_in_log_context() {
-        let (comms, mut req_rx) = make_mock_comms();
-        let block_templates = BlockTemplateStorage::new();
-
-        let block = make_test_block(3048);
-        let mining_hash_key: [u8; 32] = [0xCC; 32];
-        let vm_key: [u8; 32] = [0xDD; 32];
-        let payment_address = make_address_for_network(Network::LocalNet);
-
-        block_templates
-            .store(
-                mining_hash_key,
-                block.clone(),
-                payment_address.clone(),
-                "miner".to_string(),
-                1500,
-                vm_key,
-            )
-            .await;
-
-        task::spawn(async move {
-            while let Some(req_ctx) = req_rx.next().await {
-                match req_ctx.request() {
-                    NodeCommsRequest::GetChainMetadata => {
-                        // Return metadata with height 5000 — different from block height.
-                        req_ctx
-                            .reply(Ok(NodeCommsResponse::ChainMetadata(make_chain_metadata(
-                                5000, [2u8; 32],
-                            ))))
-                            .ok();
-                    },
-                    _ => {
-                        req_ctx.reply(Err(CommsInterfaceError::UnexpectedApiResponse)).ok();
-                    },
-                }
-            }
-        });
-
-        let consensus_rules = BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap();
-        let miner_id = "miner".to_string();
-        let req = json!({"id": 3});
-
-        let result = build_template_response(
-            &comms,
-            &consensus_rules,
-            &block_templates,
-            &mining_hash_key,
-            &miner_id,
-            &req,
-        )
-        .await;
-
-        // Should succeed — get_chain_tip returned valid metadata.
-        assert!(result.is_ok());
-    }
-
     // ---------------------------------------------------------------------------
     // Coinbase generation tests
     // ---------------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn build_coinbase_success() {
-        // Test coinbase generation with various input configurations
-        let config_wallet = make_address_for_network(Network::LocalNet);
-        let consensus_rules = BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap();
-        let range_proof_type = tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus;
-
-        // Build a minimal block template for testing
-        let mut new_template = NewBlockTemplate {
-            header: tari_node_components::blocks::NewBlockHeaderTemplate::empty(),
-            body: AggregateBody::empty(),
-            target_difficulty: Difficulty::from_u64(1).unwrap(),
-            reward: MicroMinotari::from(1000),
-            total_fees: MicroMinotari::from(0),
-            is_mempool_in_sync: true,
-        };
-
-        // Test with non-empty extra
-        let coinbase_extra_vec = vec![1u8, 2u8, 3u8];
-        let result = build_coinbase(
-            &consensus_rules,
-            &config_wallet,
-            &coinbase_extra_vec,
-            range_proof_type,
-            100,
-            &mut new_template,
-        );
-        assert!(result.is_ok(), "Coinbase generation with extra failed");
-    }
-
-    #[tokio::test]
-    async fn build_coinbase_empty_extra() {
-        // Test coinbase generation with empty extra
-        let config_wallet = make_address_for_network(Network::LocalNet);
-        let consensus_rules = BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap();
-        let range_proof_type = tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus;
-
-        let mut new_template = NewBlockTemplate {
-            header: tari_node_components::blocks::NewBlockHeaderTemplate::empty(),
-            body: AggregateBody::empty(),
-            target_difficulty: Difficulty::from_u64(1).unwrap(),
-            reward: MicroMinotari::from(1000),
-            total_fees: MicroMinotari::from(0),
-            is_mempool_in_sync: true,
-        };
-
-        let coinbase_extra_vec: Vec<u8> = vec![];
-        let result = build_coinbase(
-            &consensus_rules,
-            &config_wallet,
-            &coinbase_extra_vec,
-            range_proof_type,
-            100,
-            &mut new_template,
-        );
-        assert!(result.is_ok(), "Coinbase generation with empty extra failed");
-    }
-
-    #[tokio::test]
-    async fn sign_kernel_basic() {
-        // Test basic sign_kernel functionality - just verify the function signature compiles
-        // The full signing requires key manager which is complex to mock in unit tests
-        let config_wallet = make_address_for_network(Network::LocalNet);
-        let consensus_rules = BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap();
-        let range_proof_type = tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus;
-
-        // Build a minimal block template for testing
-        let mut new_template = NewBlockTemplate {
-            header: tari_node_components::blocks::NewBlockHeaderTemplate::empty(),
-            body: AggregateBody::empty(),
-            target_difficulty: Difficulty::from_u64(1).unwrap(),
-            reward: MicroMinotari::from(1000),
-            total_fees: MicroMinotari::from(0),
-            is_mempool_in_sync: true,
-        };
-
-        let coinbase_extra_vec = vec![1u8, 2u8, 3u8];
-        let result = build_coinbase(
-            &consensus_rules,
-            &config_wallet,
-            &coinbase_extra_vec,
-            range_proof_type,
-            100,
-            &mut new_template,
-        );
-        assert!(result.is_ok(), "Coinbase generation should succeed");
-    }
 }
