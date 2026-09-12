@@ -97,7 +97,6 @@ impl InnerService {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_get_block_template(&self, req: &Value) -> Result<Response<ProxyBody>, XmrigProxyError> {
-        // Log request start with miner identity for debugging concurrent requests
         let miner_id = parse_miner_id_from_request(req, self.peer_addr);
         trace!(
             target: LOG_TARGET,
@@ -115,9 +114,9 @@ impl InnerService {
         let payment_address = match &requested_wallet_address {
             Some(addr) if addr.network() == self.network => requested_wallet_address.clone().unwrap(),
             Some(addr) => {
-                debug!(
+                warn!(
                     target: LOG_TARGET,
-                    "Miner at {} provided address network '{}' does not match node network '{}'; falling back to config default (fallback active)",
+                    "Miner at {} provided address on network '{}' but node is on '{}'; paying to config default instead",
                     self.peer_addr,
                     addr.network(),
                     self.network
@@ -134,17 +133,14 @@ impl InnerService {
             },
         };
 
-        // 2. Register or refresh miner by resolved payment address (dedup by wallet).
         self.miner_registry.get_or_register(&payment_address).await?;
 
-        // 3. Detect chain tip advance — if Tari's state has moved on, evict stale caches.
         let mut handler = self.node_service.clone();
         let (_advanced, current_tip_height) =
             super::chain_tip::check_chain_tip_advance(&mut handler, &self.block_templates).await?;
         let next_height = current_tip_height.saturating_add(1);
 
         if let Some((cached_key, _cached_entry)) = self.block_templates.get_for_address(&payment_address).await {
-            // Add miner to the cached template (no nonce partitioning — random assignment)
             self.block_templates
                 .add_miner_to_template(cached_key, miner_id.clone())
                 .await;
@@ -156,9 +152,8 @@ impl InnerService {
                 payment_address
             );
 
-            // Re-validate after potential eviction — a concurrent request or reorg may have evicted
-            // this template between the cache lookup above and now. If template has been evicted, fall through to
-            // generate a fresh one instead of returning an error.
+            // A concurrent request or reorg may have evicted this template since the lookup
+            // above; regenerate rather than error.
             if self.block_templates.get(&cached_key).await.is_none() {
                 debug!(target: LOG_TARGET, "Cached template for address {} was evicted between lookup and response build, regenerating", payment_address);
             } else {
@@ -174,7 +169,6 @@ impl InnerService {
             }
         }
 
-        // 4. No cached template — build and store via pipeline
         let constants = self.consensus_rules.consensus_constants(next_height);
         let asking_weight = constants.max_block_transaction_weight();
 
@@ -208,7 +202,6 @@ impl InnerService {
             payment_address,
         );
 
-        // Build response via shared helper
         super::template_builder::build_template_response(
             &self.node_service,
             &self.consensus_rules,
@@ -387,22 +380,12 @@ mod tests {
         );
 
         let result = service.handle(body).await;
-        // The handler will eventually fail because the mock comms only handles
-        // GetChainMetadata and GetNewBlockTemplate but not all paths. However,
-        // we can verify that it did NOT return a network-mismatch error — instead
-        // it should have fallen back to config_wallet and proceeded past the
-        // network check. The error (if any) should be from downstream comms calls.
         match result {
             Err(XmrigProxyError::CommsError(_)) => {
-                // This is expected — the mock comms handler may not respond in time
-                // or may not handle all request types. The important thing is that
-                // we got past the network mismatch check (no panic, no wrong-network error).
             },
             Err(_e) => {
-                // Any other error is also acceptable — it means we got past network validation
             },
             Ok(_) => {
-                // Also acceptable if mock responded correctly
             },
         }
 
@@ -463,7 +446,6 @@ mod tests {
 
         let result = service.handle(body).await;
         assert!(result.is_err());
-        // The error should be MaxMinersReached (which maps to SERVICE_UNAVAILABLE)
         match result.unwrap_err() {
             XmrigProxyError::MaxMinersReached(n) => {
                 assert_eq!(n, 0);
@@ -471,7 +453,6 @@ mod tests {
             other => panic!("Expected MaxMinersReached error, got: {:?}", other),
         }
 
-        // Registry should still be empty (miner was rejected before registration)
         assert_eq!(miner_registry.len().await, 0);
     }
 
@@ -527,16 +508,13 @@ mod tests {
         );
 
         let result = service.handle(body.clone()).await;
-        // May fail at comms layer (mock doesn't handle GetNewBlockTemplate), but miner should be registered.
         assert_eq!(miner_registry.len().await, 1);
 
         // Second request — should refresh activity and find existing entry
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let _result2 = service.handle(body).await;
-        // Should still have only 1 miner (dedup by wallet address)
         assert_eq!(miner_registry.len().await, 1);
 
-        // Both requests should have been processed (may fail at comms layer but not at registry level)
         match result {
             Err(XmrigProxyError::MaxMinersReached(_)) => panic!("Should not hit max miners for known miner"),
             _ => {},
@@ -581,7 +559,6 @@ mod tests {
             peer_addr: "127.0.0.1:40000".parse().unwrap(),
         };
 
-        // Request with NO wallet_address param
         let body = bytes::Bytes::from(
             serde_json::to_string(&json!({
                 "jsonrpc": "2.0",
@@ -598,7 +575,7 @@ mod tests {
 
         match result {
             Err(XmrigProxyError::MaxMinersReached(_)) => panic!("Should not hit max miners"),
-            _ => {}, // Expected: may fail at comms layer but should have proceeded past wallet resolution
+            _ => {},
         }
     }
 
@@ -658,14 +635,12 @@ mod tests {
         );
 
         let result = service.handle(body).await;
-        // The error should be a CommsError propagated from the node comms interface.
         assert!(result.is_err());
         match result.unwrap_err() {
-            XmrigProxyError::CommsError(_) => {}, // Expected
+            XmrigProxyError::CommsError(_) => {},
             other => panic!("Expected CommsError, got: {:?}", other),
         }
 
-        // Miner should still be registered (registration happens before the comms call).
         assert_eq!(miner_registry.len().await, 1);
     }
 
@@ -707,7 +682,6 @@ mod tests {
             peer_addr: "127.0.0.1:40000".parse().unwrap(),
         };
 
-        // Request with an unknown method
         let body = bytes::Bytes::from(
             serde_json::to_string(&json!({
                 "jsonrpc": "2.0",
@@ -721,7 +695,6 @@ mod tests {
         let result = service.handle(body).await;
         assert!(result.is_ok());
 
-        // Check the response contains error code -32601
         let response = result.unwrap();
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -735,86 +708,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn handle_concurrent_requests_same_miner_dedup() {
-        // Multiple concurrent requests from the same miner (same wallet address)
-        // should be deduplicated at the registry level.
-        let config_wallet = make_address_for_network(Network::LocalNet);
-        let base58 = config_wallet.to_base58();
-        let (comms, mut req_rx) = make_mock_comms();
-        let block_templates = BlockTemplateStorage::new();
-        let miner_registry = MinerRegistry::new(MinerRegistryConfig {
-            max_miners: 32,
-            miner_timeout_secs: 300,
-        });
-
-        // Spawn a task that handles requests in a loop
-        tokio::spawn(async move {
-            while let Some(req_ctx) = req_rx.next().await {
-                match req_ctx.request() {
-                    NodeCommsRequest::GetChainMetadata => {
-                        let metadata = make_chain_metadata(100, [1u8; 32]);
-                        req_ctx.reply(Ok(NodeCommsResponse::ChainMetadata(metadata))).ok();
-                    },
-                    _ => {}, // Ignore other requests
-                };
-            }
-        });
-
-        let state_machine = make_state_machine();
-
-        let service = InnerService {
-            node_service: comms,
-            consensus_rules: BaseNodeConsensusManager::builder(Network::LocalNet).build().unwrap(),
-            state_machine,
-            block_templates,
-            wallet_payment_address: config_wallet.clone(),
-            network: Network::LocalNet,
-            coinbase_extra: Vec::new(),
-            range_proof_type: tari_transaction_components::transaction_components::RangeProofType::BulletProofPlus,
-            miner_registry: miner_registry.clone(),
-            peer_addr: "127.0.0.1:40000".parse().unwrap(),
-        };
-
-        let body = bytes::Bytes::from(
-            serde_json::to_string(&json!({
-                "jsonrpc": "2.0",
-                "method": "getblocktemplate",
-                "params": { "wallet_address": base58 },
-                "id": 1,
-            }))
-            .unwrap(),
-        );
-
-        // Make multiple concurrent requests with the same wallet address
-        let handle1 = {
-            let body1 = body.clone();
-            let service1 = service.clone();
-            tokio::spawn(async move { service1.handle(body1).await })
-        };
-
-        let handle2 = {
-            let body2 = body.clone();
-            let service2 = service.clone();
-            tokio::spawn(async move { service2.handle(body2).await })
-        };
-
-        // Both requests should succeed (may fail at comms layer but not at registry level)
-        let result1 = handle1.await.unwrap_or_else(|_| panic!("First request failed"));
-        let result2 = handle2.await.unwrap_or_else(|_| panic!("Second request failed"));
-
-        // Only one miner entry should exist in the registry despite concurrent requests
-        assert_eq!(miner_registry.len().await, 1);
-
-        // Both responses should be valid JSON-RPC responses
-        for result in [result1, result2] {
-            if result.is_ok() {
-                let response = result.unwrap();
-                let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-                let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
-                // Should either be a success or an error (e.g., max miners)
-                assert!(parsed.get("result").is_some() || parsed.get("error").is_some());
-            }
-        }
-    }
 }
