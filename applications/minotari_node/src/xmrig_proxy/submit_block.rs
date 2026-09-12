@@ -21,17 +21,11 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Submit block handling for the XMRig proxy.
-//!
-//! Validates the submitted blob, extracts mining hash and nonce from it, looks up the
-//! corresponding cached template (removing it to prevent duplicate submissions), patches
-//! the nonce in the block header, and submits to the base node.
 
 use hyper::{Response, StatusCode};
 use log::{info, warn};
 use serde_json::{Value, json};
 use tari_core::base_node::LocalNodeCommsInterface;
-
-// Test helpers use PowAlgorithm locally - not imported at module level
 
 use super::{
     blob::parse_mining_blob,
@@ -70,10 +64,9 @@ pub async fn handle_submit_block(
 
     let blob = hex::decode(blob_hex).map_err(|e| XmrigProxyError::InvalidRequest(e.to_string()))?;
 
-    // Parse mining hash and nonce using shared parser (avoids magic numbers in callers)
     let (mining_hash, nonce) = parse_mining_blob(&blob)?;
 
-    // Look up and remove the stored block template (prevents duplicate submissions)
+    // Removing the template on take prevents duplicate submissions
     let mut block = match block_templates.take(&mining_hash).await {
         Some(b) => b,
         None => {
@@ -89,13 +82,11 @@ pub async fn handle_submit_block(
         },
     };
 
-    // Update the nonce in the block header
     block.header.nonce = nonce;
 
     let block_height = block.header.height;
     info!(target: LOG_TARGET, "Submitting block #{block_height} with nonce={nonce} to base node");
 
-    // Submit to the base node via LocalNodeCommsInterface
     let mut handler = node_service.clone();
     match handler.submit_block(block).await {
         Ok(block_hash) => {

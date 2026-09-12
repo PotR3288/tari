@@ -23,11 +23,9 @@ Feature: XMRig Proxy SubmitBlock Happy Path
 
   # -----------------------------------------------------------------------
   # Scenario S2: Duplicate submission rejected
-  # After a successful submitblock, the template is atomically removed from
-  # the cache via take(). A second submission of the same blob must be
-  # rejected with error code -1 and "already submitted" in the message.
-  # This verifies the duplicate-submission guard that prevents double-
-  # spending the same template at the base node.
+  # After a successful submitblock the template is removed from the cache via
+  # take(), so a second submission of the same blob is rejected with error
+  # code -1 and "already submitted" in the message.
   # -----------------------------------------------------------------------
   Scenario: Duplicate submission is rejected
     When I request a block template from NODE with miner ID "submit_miner_s2"

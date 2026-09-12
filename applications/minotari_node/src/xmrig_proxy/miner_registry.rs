@@ -72,16 +72,11 @@ impl MinerRegistry {
 
     /// Look up an existing miner or register a new one by resolved payment address.
     ///
-    /// The `payment_address` is the already-resolved wallet address (miner-provided if valid,
-    /// otherwise the config default). This means all miners paying to the same address share
-    /// one registry entry and one cached template.
-    ///
     /// Returns `Err(MaxMinersReached)` if the cap is exceeded and the miner is unknown.
     /// For known miners, updates `last_activity`.
     pub async fn get_or_register(&self, payment_address: &TariAddress) -> Result<MinerEntry, XmrigProxyError> {
         let mut map = self.inner.write().await;
 
-        // Check if any existing entry has the same payment address (dedup by wallet).
         for (_key, entry) in map.iter_mut() {
             if &entry.payment_address == payment_address {
                 debug!(
@@ -94,7 +89,6 @@ impl MinerRegistry {
             }
         }
 
-        // New miner — check capacity.
         if map.len() >= self.config.max_miners {
             warn!(
                 target: LOG_TARGET,
@@ -111,7 +105,6 @@ impl MinerRegistry {
             last_activity: now,
         };
 
-        // Use the wallet address string as the key.
         let key = payment_address.to_string();
         debug!(
             target: LOG_TARGET,
