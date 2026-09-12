@@ -111,11 +111,9 @@ impl BlockTemplateStorage {
     ) {
         let mut map = self.inner.write().await;
 
-        // Check if template already exists for this key
         let is_replacement = map.contains_key(&key);
 
         if is_replacement {
-            // Add this miner to existing template's assigned miners
             if let Some(entry) = map.get_mut(&key) {
                 debug!(
                     target: LOG_TARGET,

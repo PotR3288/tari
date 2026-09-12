@@ -164,8 +164,7 @@ async fn xmrig_proxy_get_getblocktemplate(world: &mut TariWorld, base_node_name:
 
 /// Patch the stored block template blob with a given nonce and submit it.
 /// The Tari mining blob is 76 bytes: [3 zero][mining_hash:32][nonce:8 big-endian][pow_algo:1][reserved:32].
-/// Nonce occupies bytes 35..43 (big-endian). This enables testing the happy-path
-/// submitblock flow — get a template, patch in a nonce, submit immediately before eviction.
+/// The nonce occupies bytes 35..43 (big-endian).
 #[when(expr = r"I submit the stored blob with nonce {int} through base node {word} xmrig proxy")]
 async fn xmrig_proxy_submit_stored_blob_with_nonce(world: &mut TariWorld, nonce: u64, base_node_name: String) {
     const TARI_BLOB_RESERVED_OFFSET: usize = 35;
@@ -388,10 +387,8 @@ async fn xmrig_proxy_mine_randomxt_blocks(world: &mut TariWorld, num_blocks: u64
 // Sha3x block mining step (for XMRig proxy eviction tests)
 // ---------------------------------------------------------------------------
 
-/// Mine blocks using Sha3x algorithm so the proxy detects a non-RandomXT tip advance
-/// and evicts cached templates. This verifies that *any* chain tip advance — not just
-/// RandomXT advances — invalidates stale templates whose prev_hash no longer matches
-/// the current best chain.
+/// Mine Sha3x blocks so the proxy sees a chain tip advance it did not cause and
+/// evicts cached templates whose prev_hash no longer matches the best chain.
 #[when(expr = r"I mine {int} Sha3x blocks on {word}")]
 async fn xmrig_proxy_mine_sha3x_blocks(world: &mut TariWorld, num_blocks: u64, base_node_name: String) {
     let mut client = world
@@ -513,7 +510,7 @@ fn xmrig_proxy_assert_status_ok(world: &mut TariWorld) {
 }
 
 /// Assert that the response contains a specific dotted-path field.
-/// E.g., "nonce_range.start" checks resp.result.nonce_range.start exists.
+/// E.g., "status" checks resp.result.status exists.
 #[then(regex = r#"the response contains field "([^"]+)"#)]
 fn xmrig_proxy_assert_response_contains_field(world: &mut TariWorld, path: String) {
     let parts: Vec<&str> = path.split('.').collect();
@@ -860,110 +857,3 @@ async fn xmrig_proxy_get_template_same_wallet_different_extra_nonce(
 // Phase 2 P4: Response field assertions for getblocktemplate
 // ===========================================================================
 
-/// Assert that the response contains a specific dotted-path field under result.
-/// E.g., "min_nonce" checks resp.result.min_nonce exists and is a number.
-#[then(regex = r#"the response contains numeric field "([^"]+)"#)]
-fn xmrig_proxy_assert_response_contains_numeric_field(world: &mut TariWorld, path: String) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    // Walk the JSON tree starting from result
-    let mut current = world.last_xmrig_proxy_response.get("result");
-    for part in &parts {
-        match current {
-            Some(obj) => current = obj.get(*part),
-            None => break,
-        }
-    }
-
-    assert!(
-        current.is_some_and(|v| v.is_number()),
-        "Response does not contain numeric field '{}' or it's not a number. Full response: {}",
-        path,
-        world.last_xmrig_proxy_response
-    );
-}
-
-/// Assert that the response contains a specific dotted-path string field under result.
-#[then(regex = r#"the response contains string field "([^"]+)"#)]
-fn xmrig_proxy_assert_response_contains_string_field(world: &mut TariWorld, path: String) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    // Walk the JSON tree starting from result
-    let mut current = world.last_xmrig_proxy_response.get("result");
-    for part in &parts {
-        match current {
-            Some(obj) => current = obj.get(*part),
-            None => break,
-        }
-    }
-
-    assert!(
-        current.is_some_and(|v| v.as_str().is_some()),
-        "Response does not contain string field '{}' or it's not a string. Full response: {}",
-        path,
-        world.last_xmrig_proxy_response
-    );
-}
-
-/// Assert that the response contains a specific dotted-path boolean field under result.
-#[then(regex = r#"the response contains boolean field "([^"]+)"#)]
-fn xmrig_proxy_assert_response_contains_boolean_field(world: &mut TariWorld, path: String) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    // Walk the JSON tree starting from result
-    let mut current = world.last_xmrig_proxy_response.get("result");
-    for part in &parts {
-        match current {
-            Some(obj) => current = obj.get(*part),
-            None => break,
-        }
-    }
-
-    assert!(
-        current.is_some_and(|v| v.is_boolean()),
-        "Response does not contain boolean field '{}' or it's not a boolean. Full response: {}",
-        path,
-        world.last_xmrig_proxy_response
-    );
-}
-
-/// Assert that min_nonce <= max_nonce in the getblocktemplate response.
-#[then(expr = r"the nonce range is valid \(min_nonce <= max_nonce\)")]
-fn xmrig_proxy_assert_nonce_range_valid(world: &mut TariWorld) {
-    let result = world.last_xmrig_proxy_response.get("result").expect("no result");
-
-    let min_nonce = result
-        .get("min_nonce")
-        .and_then(Value::as_u64)
-        .expect("'result.min_nonce' must be a number");
-
-    let max_nonce = result
-        .get("max_nonce")
-        .and_then(Value::as_u64)
-        .expect("'result.max_nonce' must be a number");
-
-    assert!(
-        min_nonce <= max_nonce,
-        "Expected min_nonce ({}) <= max_nonce ({}), but got min > max. Full response: {}",
-        min_nonce,
-        max_nonce,
-        world.last_xmrig_proxy_response
-    );
-}
-
-/// Assert that the miner_id field in the response is a non-empty string.
-#[then(expr = r"the response contains a non-empty miner_id")]
-fn xmrig_proxy_assert_miner_id_nonempty(world: &mut TariWorld) {
-    let result = world.last_xmrig_proxy_response.get("result").expect("no result");
-
-    let miner_id = result
-        .get("miner_id")
-        .and_then(Value::as_str)
-        .expect("'result.miner_id' must be a string");
-
-    assert!(
-        !miner_id.is_empty(),
-        "Expected non-empty miner_id, got empty string. Full response: {}",
-        world.last_xmrig_proxy_response
-    );
-}
